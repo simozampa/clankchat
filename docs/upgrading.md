@@ -2,6 +2,19 @@
 
 SameTree is pre-1.0 alpha software. Back up coordination state before upgrades and do not mix versions against the same database.
 
+## Upgrade To 0.1.3
+
+Version 0.1.3 adds personal-only harness setup and transparently replaces an expired MCP session after system sleep. Recovery preserves and renews only still-valid task and path leases; expired leases remain expired.
+
+1. Finish or pause work and stop every Claude Code, OpenCode, SameTree MCP, watcher, message follower, and other process using each standalone or workspace database.
+2. Back up every `state.sqlite3` with its `-wal` and `-shm` sidecars as one coherent set while all processes are stopped.
+3. Install `npm install --global sametree@0.1.3 --force` from your normal Node.js shell.
+4. For repository-visible coordination, rerun `sametree setup --claude --opencode`, omitting unused harnesses.
+5. For personal-only coordination, first remove earlier SameTree imports or managed blocks from tracked `CLAUDE.md` and `AGENTS.md`, then run `sametree setup --local --claude --opencode`. Local setup refuses to continue while repository-visible SameTree instructions remain.
+6. Review `git status` and tracked-file diffs, then restart every harness.
+
+The local-only exclude block is private to the Git clone and therefore shared by linked worktrees in that clone. Remove the complete managed block before intentionally switching the clone back to repository-visible setup.
+
 ## Upgrade To 0.1.2
 
 Version 0.1.2 consolidates the current prelaunch feature set: multi-repository workspace coordination, linked-worktree support, automatic plan sharing, explicit shared user instructions, live Claude Code and OpenCode message delivery, safer setup recovery, native Node runtime pinning, and resilient SQLite writer contention handling.
