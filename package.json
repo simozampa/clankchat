@@ -1,6 +1,6 @@
 {
   "name": "sametree",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Local coordination for coding agents across Git working trees and repositories",
   "keywords": [
     "agent",
