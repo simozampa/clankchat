@@ -7,7 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import { Coordinator } from './coordinator.js';
-import { errorResult } from './errors.js';
+import { errorResult, isSameTreeError } from './errors.js';
 import { runWithInstallRuntime } from './runtime.js';
 import type { Harness, PathClaim, TaskPriority, TaskStatus } from './types.js';
 import { VERSION } from './version.js';
@@ -26,24 +26,28 @@ const automaticSuffix =
   nativeSession?.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^-+|-+$/gu, '') || String(process.pid);
 const agent = process.env.SAMETREE_AGENT || `${harness}-${automaticSuffix}`.slice(0, 80);
 function openCoordinator(): Coordinator {
+  return Coordinator.open({
+    agent,
+    harness,
+    role: process.env.SAMETREE_ROLE ?? 'implementer',
+    cwd: process.env.SAMETREE_CWD ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd(),
+    ...(process.env.SAMETREE_WORKSPACE_REGISTRY
+      ? { workspaceRegistryRoot: process.env.SAMETREE_WORKSPACE_REGISTRY }
+      : {}),
+    recordSessionLifecycleEvents: false,
+  });
+}
+
+function openInitialCoordinator(): Coordinator {
   try {
-    return Coordinator.open({
-      agent,
-      harness,
-      role: process.env.SAMETREE_ROLE ?? 'implementer',
-      cwd: process.env.SAMETREE_CWD ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd(),
-      ...(process.env.SAMETREE_WORKSPACE_REGISTRY
-        ? { workspaceRegistryRoot: process.env.SAMETREE_WORKSPACE_REGISTRY }
-        : {}),
-      recordSessionLifecycleEvents: false,
-    });
+    return openCoordinator();
   } catch (error) {
     writeSync(process.stderr.fd, `${JSON.stringify(errorResult(error))}\n`);
     process.exit(1);
   }
 }
 
-const coordinator = openCoordinator();
+let coordinator = openInitialCoordinator();
 
 const server = new McpServer({ name: 'sametree', version: VERSION });
 const outputSchema = { result: z.unknown() };
@@ -54,6 +58,31 @@ function result(value: unknown) {
     content: [{ type: 'text' as const, text: JSON.stringify(value) }],
     structuredContent,
   };
+}
+
+function sessionExpired(error: unknown): boolean {
+  return (
+    isSameTreeError(error) &&
+    error.code === 'TASK_UNAVAILABLE' &&
+    error.message.startsWith('This session expired')
+  );
+}
+
+function recoverExpiredSession(): void {
+  const expired = coordinator;
+  const replacement = openCoordinator();
+  try {
+    replacement.recoverLeasesFromExpiredSession(expired.sessionId);
+  } catch (error) {
+    replacement.close({ releaseClaims: true });
+    throw error;
+  }
+  coordinator = replacement;
+  try {
+    expired.close();
+  } catch (error) {
+    process.stderr.write(`SameTree expired session close failed: ${String(error)}\n`);
+  }
 }
 
 function claimReceipts(claims: PathClaim[]) {
@@ -71,7 +100,16 @@ function execute(operation: () => unknown) {
   try {
     return result(operation());
   } catch (error) {
-    const value = errorResult(error);
+    let failure = error;
+    if (sessionExpired(error)) {
+      try {
+        recoverExpiredSession();
+        return result(operation());
+      } catch (recoveryError) {
+        failure = recoveryError;
+      }
+    }
+    const value = errorResult(failure);
     return { ...result(value), isError: true };
   }
 }
@@ -633,6 +671,15 @@ const heartbeat = setInterval(() => {
   try {
     coordinator.heartbeat();
   } catch (error) {
+    if (sessionExpired(error)) {
+      try {
+        recoverExpiredSession();
+        return;
+      } catch (recoveryError) {
+        process.stderr.write(`SameTree session recovery failed: ${String(recoveryError)}\n`);
+        return;
+      }
+    }
     process.stderr.write(`SameTree heartbeat failed: ${String(error)}\n`);
   }
 }, 20_000);
