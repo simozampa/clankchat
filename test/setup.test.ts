@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -178,6 +180,229 @@ describe('project setup', () => {
     expect(
       JSON.parse(readFileSync(path.join(repository.root, '.opencode', 'tui.json'), 'utf8')),
     ).toMatchObject({ plugin: ['./sametree-tui.ts'] });
+  });
+
+  it('keeps local-only integrations out of tracked team instructions', () => {
+    const repository = setup();
+    const agentsPath = path.join(repository.root, 'AGENTS.md');
+    const claudePath = path.join(repository.root, 'CLAUDE.md');
+    const opencodePath = path.join(repository.root, 'opencode.json');
+    writeFileSync(agentsPath, '# Team agent instructions\n');
+    writeFileSync(claudePath, '# Team Claude instructions\n');
+    writeFileSync(opencodePath, '{"username":"team-config"}\n');
+    execFileSync('git', ['add', 'AGENTS.md', 'CLAUDE.md', 'opencode.json'], {
+      cwd: repository.root,
+    });
+    const statusBefore = execFileSync('git', ['status', '--short'], {
+      cwd: repository.root,
+      encoding: 'utf8',
+    });
+    let registered = false;
+    const plugins = claudePluginCommands();
+    const runner: ClaudeCommandRunner = (args) => {
+      const pluginResult = plugins(args);
+      if (pluginResult) return pluginResult;
+      if (args[0] === '--version') return { status: 0, stdout: '2.1.0', stderr: '' };
+      if (args[0] === 'mcp' && args[1] === 'get') {
+        return registered
+          ? { status: 0, stdout: VALID_CLAUDE_SERVER, stderr: '' }
+          : { status: 1, stdout: '', stderr: MISSING_CLAUDE_SERVER };
+      }
+      if (args[0] === 'mcp' && args[1] === 'add') registered = true;
+      return { status: 0, stdout: 'ok', stderr: '' };
+    };
+
+    const first = setupProject(repository.root, {
+      claude: true,
+      opencode: true,
+      local: true,
+      claudeRunner: runner,
+    });
+    const localConfigPath = path.join(repository.root, '.opencode', 'opencode.json');
+    const localConfig = JSON.parse(readFileSync(localConfigPath, 'utf8')) as {
+      instructions: string[];
+      mcp: { sametree: { timeout: number } };
+    };
+
+    expect(first.opencode?.configFile).toBe('.opencode/opencode.json');
+    expect(readFileSync(agentsPath, 'utf8')).toBe('# Team agent instructions\n');
+    expect(readFileSync(claudePath, 'utf8')).toBe('# Team Claude instructions\n');
+    expect(readFileSync(opencodePath, 'utf8')).toBe('{"username":"team-config"}\n');
+    expect(readFileSync(path.join(repository.root, 'CLAUDE.local.md'), 'utf8')).toMatch(
+      /^@\.sametree\/coordination\.md/u,
+    );
+    expect(localConfig.instructions).toContain('.sametree/coordination.md');
+    expect(localConfig.mcp.sametree.timeout).toBe(15_000);
+    const excludes = readFileSync(path.join(repository.root, '.git', 'info', 'exclude'), 'utf8');
+    expect(excludes).toContain('# BEGIN SameTree local-only setup\n/.sametree/');
+    expect(excludes).toContain('/.opencode/opencode.json');
+    expect(
+      execFileSync('git', ['status', '--short'], { cwd: repository.root, encoding: 'utf8' }),
+    ).toBe(statusBefore);
+
+    const second = setupProject(repository.root, {
+      claude: true,
+      opencode: true,
+      local: true,
+      claudeRunner: runner,
+    });
+    expect(second.claude?.instructions).toBe('existing');
+    expect(second.opencode).toMatchObject({ mcp: 'existing', instructions: 'existing' });
+  });
+
+  it('does not hide an unrelated untracked root OpenCode config', () => {
+    const repository = setup();
+    const rootConfigPath = path.join(repository.root, 'opencode.json');
+    writeFileSync(rootConfigPath, '{"username":"personal-config"}\n');
+
+    const result = setupProject(repository.root, { opencode: true, local: true });
+    const excludes = readFileSync(path.join(repository.root, '.git', 'info', 'exclude'), 'utf8');
+
+    expect(result.opencode?.configFile).toBe('.opencode/opencode.json');
+    expect(readFileSync(rootConfigPath, 'utf8')).toBe('{"username":"personal-config"}\n');
+    expect(excludes.split('\n')).not.toContain('/opencode.json');
+    expect(
+      execFileSync('git', ['status', '--short'], { cwd: repository.root, encoding: 'utf8' }),
+    ).toContain('?? opencode.json');
+  });
+
+  it('reuses an untracked root OpenCode config already managed by SameTree', () => {
+    const repository = setup();
+    const rootConfigPath = path.join(repository.root, 'opencode.json');
+    writeFileSync(
+      rootConfigPath,
+      `${JSON.stringify({
+        mcp: {
+          sametree: {
+            type: 'local',
+            command: ['sametree-mcp'],
+            environment: { SAMETREE_HARNESS: 'opencode' },
+            enabled: true,
+          },
+        },
+      })}\n`,
+    );
+
+    const result = setupProject(repository.root, { opencode: true, local: true });
+    const config = JSON.parse(readFileSync(rootConfigPath, 'utf8')) as {
+      instructions: string[];
+      mcp: { sametree: { timeout: number } };
+    };
+
+    expect(result.opencode?.configFile).toBe('opencode.json');
+    expect(config.instructions).toContain('.sametree/coordination.md');
+    expect(config.mcp.sametree.timeout).toBe(15_000);
+    expect(existsSync(path.join(repository.root, '.opencode', 'opencode.json'))).toBe(false);
+    expect(readFileSync(path.join(repository.root, '.git', 'info', 'exclude'), 'utf8')).toContain(
+      '/opencode.json',
+    );
+  });
+
+  it('refuses repository setup while clone-wide local exclusions remain', () => {
+    const repository = setup();
+    setupProject(repository.root, { opencode: true, local: true });
+
+    expect(() => setupProject(repository.root, { opencode: true })).toThrow(
+      /still has SameTree local-only exclusions/u,
+    );
+  });
+
+  it('refuses local-only setup while repository-visible SameTree instructions remain', () => {
+    const repository = setup();
+    setupProject(repository.root, { opencode: true });
+
+    expect(() => setupProject(repository.root, { opencode: true, local: true })).toThrow(
+      /repository-visible SameTree instructions/u,
+    );
+    expect(readFileSync(path.join(repository.root, 'AGENTS.md'), 'utf8')).toContain(
+      '<!-- sametree:coordination -->',
+    );
+  });
+
+  it('refuses local-only setup when a generated path is tracked', () => {
+    const repository = setup();
+    mkdirSync(path.join(repository.root, '.sametree'));
+    writeFileSync(path.join(repository.root, '.sametree', 'config.json'), '{}\n');
+    execFileSync('git', ['add', '.sametree/config.json'], { cwd: repository.root });
+
+    expect(() => setupProject(repository.root, { opencode: true, local: true })).toThrow(
+      /paths already tracked by Git/u,
+    );
+    expect(
+      readFileSync(path.join(repository.root, '.git', 'info', 'exclude'), 'utf8'),
+    ).not.toContain('SameTree local-only setup');
+  });
+
+  it('rolls back when higher-precedence Git rules expose local files', () => {
+    const repository = setup();
+    const excludePath = path.join(repository.root, '.git', 'info', 'exclude');
+    const excludeBefore = readFileSync(excludePath, 'utf8');
+    writeFileSync(path.join(repository.root, '.gitignore'), '!/.sametree/\n!/.sametree/**\n');
+    execFileSync('git', ['add', '.gitignore'], { cwd: repository.root });
+
+    expect(() => setupProject(repository.root, { opencode: true, local: true })).toThrow(
+      /Git ignore rules expose files/u,
+    );
+    expect(readFileSync(excludePath, 'utf8')).toBe(excludeBefore);
+    expect(existsSync(path.join(repository.root, '.sametree'))).toBe(false);
+    expect(existsSync(path.join(repository.root, '.opencode'))).toBe(false);
+  });
+
+  it('uses an existing managed local OpenCode JSONC config', () => {
+    const repository = setup();
+    const configPath = path.join(repository.root, '.opencode', 'opencode.jsonc');
+    mkdirSync(path.dirname(configPath));
+    writeFileSync(
+      configPath,
+      `{
+  // Personal OpenCode configuration
+  "mcp": {
+    "sametree": {
+      "type": "local",
+      "command": ["sametree-mcp"],
+      "environment": { "SAMETREE_HARNESS": "opencode" }
+    }
+  }
+}\n`,
+    );
+
+    const result = setupProject(repository.root, { opencode: true, local: true });
+    const config = parse(readFileSync(configPath, 'utf8')) as {
+      instructions: string[];
+      mcp: { sametree: { timeout: number } };
+    };
+
+    expect(result.opencode?.configFile).toBe('.opencode/opencode.jsonc');
+    expect(config.instructions).toContain('.sametree/coordination.md');
+    expect(config.mcp.sametree.timeout).toBe(15_000);
+    expect(existsSync(path.join(repository.root, '.opencode', 'opencode.json'))).toBe(false);
+  });
+
+  it('rejects concurrent setup in the same Git clone', () => {
+    const repository = setup();
+    const lockDirectory = path.join(repository.root, '.git', 'sametree');
+    mkdirSync(lockDirectory);
+    writeFileSync(path.join(lockDirectory, 'setup.lock'), 'another setup\n');
+
+    expect(() => setupProject(repository.root, { opencode: true, local: true })).toThrow(
+      /Another SameTree setup may be running/u,
+    );
+    expect(existsSync(path.join(repository.root, '.sametree'))).toBe(false);
+  });
+
+  it('refuses to replace a symlinked Git exclude file', () => {
+    const repository = setup();
+    const excludePath = path.join(repository.root, '.git', 'info', 'exclude');
+    const targetPath = path.join(repository.root, 'custom-excludes');
+    writeFileSync(targetPath, '# personal excludes\n');
+    rmSync(excludePath);
+    symlinkSync(targetPath, excludePath);
+
+    expect(() => setupProject(repository.root, { opencode: true, local: true })).toThrow(
+      /symlinked Git exclude file/u,
+    );
+    expect(readFileSync(targetPath, 'utf8')).toBe('# personal excludes\n');
+    expect(lstatSync(excludePath).isSymbolicLink()).toBe(true);
   });
 
   it('adds the safe startup timeout to an existing managed OpenCode server', () => {
@@ -832,6 +1057,35 @@ Use SameTree before editing: check status, inbox, policy state, and active claim
     expect(existsSync(path.join(repository.root, '.sametree'))).toBe(false);
   });
 
+  it('rolls back local excludes when local-only registration fails', () => {
+    const repository = setup();
+    const excludePath = path.join(repository.root, '.git', 'info', 'exclude');
+    const excludeBefore = readFileSync(excludePath, 'utf8');
+    const plugins = claudePluginCommands();
+    const runner: ClaudeCommandRunner = (args) => {
+      const pluginResult = plugins(args);
+      if (pluginResult) return pluginResult;
+      if (args[0] === '--version') return { status: 0, stdout: '2.1.0', stderr: '' };
+      if (args[0] === 'mcp' && args[1] === 'get') {
+        return { status: 1, stdout: '', stderr: MISSING_CLAUDE_SERVER };
+      }
+      return { status: 1, stdout: '', stderr: 'failed' };
+    };
+
+    expect(() =>
+      setupProject(repository.root, {
+        claude: true,
+        opencode: true,
+        local: true,
+        claudeRunner: runner,
+      }),
+    ).toThrow(/registration failed/u);
+    expect(readFileSync(excludePath, 'utf8')).toBe(excludeBefore);
+    expect(existsSync(path.join(repository.root, '.sametree'))).toBe(false);
+    expect(existsSync(path.join(repository.root, '.opencode'))).toBe(false);
+    expect(existsSync(path.join(repository.root, 'CLAUDE.local.md'))).toBe(false);
+  });
+
   it('removes a Claude server that fails post-registration validation', () => {
     const repository = setup();
     let getCalls = 0;
@@ -889,6 +1143,35 @@ Use SameTree before editing: check status, inbox, policy state, and active claim
     ).toThrow(/rollback preserved/u);
     expect(readFileSync(agentsPath, 'utf8')).toBe('concurrent user edit\n');
     expect(existsSync(path.join(repository.root, 'opencode.json'))).toBe(false);
+  });
+
+  it('keeps local excludes when a concurrent local edit survives rollback', () => {
+    const repository = setup();
+    const localInstructionsPath = path.join(repository.root, 'CLAUDE.local.md');
+    const plugins = claudePluginCommands();
+    const runner: ClaudeCommandRunner = (args) => {
+      const pluginResult = plugins(args);
+      if (pluginResult) return pluginResult;
+      if (args[0] === '--version') return { status: 0, stdout: '2.1.0', stderr: '' };
+      if (args[0] === 'mcp' && args[1] === 'get') {
+        return { status: 1, stdout: '', stderr: MISSING_CLAUDE_SERVER };
+      }
+      if (args[0] === 'mcp' && args[1] === 'add') {
+        writeFileSync(localInstructionsPath, 'concurrent local edit\n');
+      }
+      return { status: 1, stdout: '', stderr: 'failed' };
+    };
+
+    expect(() =>
+      setupProject(repository.root, { claude: true, local: true, claudeRunner: runner }),
+    ).toThrow(/rollback preserved/u);
+    expect(readFileSync(localInstructionsPath, 'utf8')).toBe('concurrent local edit\n');
+    expect(
+      execFileSync('git', ['check-ignore', '--no-index', 'CLAUDE.local.md'], {
+        cwd: repository.root,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('CLAUDE.local.md');
   });
 
   it('does not follow a parent symlink swapped in before rollback', () => {

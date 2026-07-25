@@ -225,17 +225,21 @@ program
 program
   .command('setup')
   .description('Initialize SameTree and configure project-local harness integrations.')
-  .option('--claude', 'configure Claude Code MCP and CLAUDE.md')
-  .option('--opencode', 'configure OpenCode MCP and AGENTS.md')
-  .action((options: { claude?: boolean; opencode?: boolean }, command: Command) => {
-    const globals = command.optsWithGlobals<GlobalOptions>();
-    print(
-      setupProject(globals.cwd, {
-        claude: options.claude ?? false,
-        opencode: options.opencode ?? false,
-      }),
-    );
-  });
+  .option('--claude', 'configure Claude Code MCP and instructions')
+  .option('--opencode', 'configure OpenCode MCP and instructions')
+  .option('--local', 'keep generated files private and leave team instructions unchanged')
+  .action(
+    (options: { claude?: boolean; opencode?: boolean; local?: boolean }, command: Command) => {
+      const globals = command.optsWithGlobals<GlobalOptions>();
+      print(
+        setupProject(globals.cwd, {
+          claude: options.claude ?? false,
+          opencode: options.opencode ?? false,
+          local: options.local ?? false,
+        }),
+      );
+    },
+  );
 
 program
   .command('status')

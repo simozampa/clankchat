@@ -49,6 +49,16 @@ git diff
 
 Review the setup result, the contents of newly created files shown by Git status, and tracked-file diffs before launching agents. Omit `--claude` or `--opencode` when unused. If every agent shares this working tree, skip the optional workspace section.
 
+For personal coordination in a team repository, keep every SameTree integration file local:
+
+```bash
+sametree setup --local --claude --opencode
+```
+
+Local-only setup writes Claude guidance to `CLAUDE.local.md`, adds OpenCode guidance through a private config, and records its generated paths in a managed `.git/info/exclude` block. It leaves tracked `CLAUDE.md` and `AGENTS.md` unchanged and refuses to update any generated path that Git already tracks.
+
+Git's `info/exclude` file is local to the clone but shared by linked worktrees. Remove the complete managed block before switching that clone back to repository-visible setup; SameTree refuses a non-local setup while the block remains.
+
 ## Share An Instruction
 
 Begin a Claude Code or OpenCode user prompt with this exact, case-sensitive prefix:
@@ -117,7 +127,7 @@ SAMETREE_AGENT=human sametree status
 
 ## Local By Design
 
-SameTree stores operational state in SQLite under Git's private directories or the local workspace registry. Policy and role files under `.sametree/` remain versioned with the repository.
+SameTree stores operational state in SQLite under Git's private directories or the local workspace registry. By default, policy and role files under `.sametree/` remain versioned with the repository. Use `setup --local` when those files and harness integrations must remain private to one local clone.
 
 SameTree is for trusted processes on one machine. It does not merge simultaneous edits, synchronize files, sandbox agents, or support state databases on network and cloud-synced filesystems.
 
