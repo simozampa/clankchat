@@ -1,5 +1,17 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmdirSync, rmSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,6 +39,10 @@ import {
 import { VERSION } from './version.js';
 
 const OPENCODE_MCP_TIMEOUT_MS = 15_000;
+const LOCAL_OPENCODE_CONFIG_PATH = '.opencode/opencode.json';
+const LOCAL_INSTRUCTION_PATH = '.sametree/coordination.md';
+const LOCAL_EXCLUDE_BEGIN = '# BEGIN SameTree local-only setup';
+const LOCAL_EXCLUDE_END = '# END SameTree local-only setup';
 const OPENCODE_SERVER = {
   type: 'local',
   command: ['sametree-mcp'],
@@ -116,6 +132,13 @@ interface FileSnapshot {
   mode: number;
 }
 
+interface LocalExcludePlan {
+  absolutePath: string;
+  content: string | null;
+  originalContent: string | null;
+  mode: number;
+}
+
 interface ClaudePlan {
   addMcp: boolean;
   instructions: FilePlan;
@@ -129,7 +152,9 @@ interface ClaudePlan {
 
 interface OpenCodePlan {
   config: FilePlan;
-  instructions: FilePlan;
+  mcpStatus: FilePlan['status'];
+  instructions: FilePlan | null;
+  instructionsStatus: FilePlan['status'];
   plugin: Omit<FilePlan, 'status'> & { status: 'added' | 'existing' | 'updated' };
   planPlugin: Omit<FilePlan, 'status'> & { status: 'added' | 'existing' | 'updated' };
   tuiConfig: FilePlan;
@@ -146,6 +171,204 @@ function readTextFile(target: string): string | null {
     if (error instanceof Error && Reflect.get(error, 'code') === 'ENOENT') return null;
     throw error;
   }
+}
+
+function trackedFiles(repositoryRoot: string, relativePaths: string[]): string[] {
+  if (relativePaths.length === 0) return [];
+  const result = spawnSync(
+    'git',
+    [
+      'ls-files',
+      '--cached',
+      '-z',
+      '--',
+      ...relativePaths.map((relativePath) => `:(literal)${gitPath(relativePath)}`),
+    ],
+    {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  if (result.status !== 0) {
+    throw new SameTreeError('GIT_STATUS_ERROR', 'Could not inspect tracked setup paths.', {
+      stderr: result.stderr.trim(),
+      ...(result.error ? { cause: result.error.message } : {}),
+    });
+  }
+  return result.stdout.split('\0').filter(Boolean);
+}
+
+function gitPath(relativePath: string): string {
+  return relativePath.replaceAll('\\', '/');
+}
+
+function preflightLocalExcludes(
+  commonGitDirectory: string,
+  patterns: readonly string[],
+): LocalExcludePlan {
+  const absolutePath = path.join(commonGitDirectory, 'info', 'exclude');
+  const originalContent = readTextFile(absolutePath);
+  if (originalContent !== null && lstatSync(absolutePath).isSymbolicLink()) {
+    throw new SameTreeError(
+      'INVALID_INPUT',
+      'Local-only setup cannot safely update a symlinked Git exclude file.',
+      { path: absolutePath },
+    );
+  }
+
+  const lines = (originalContent ?? '').split('\n');
+  const begin = lines.findIndex((line) => line.trim() === LOCAL_EXCLUDE_BEGIN);
+  const end = lines.findIndex((line) => line.trim() === LOCAL_EXCLUDE_END);
+  if ((begin === -1) !== (end === -1) || (begin !== -1 && end <= begin)) {
+    throw new SameTreeError('INVALID_INPUT', 'The SameTree Git exclude block is malformed.', {
+      path: absolutePath,
+    });
+  }
+  const existingPatterns =
+    begin === -1
+      ? []
+      : lines
+          .slice(begin + 1, end)
+          .map((line) => line.trim())
+          .filter(Boolean);
+  const managedPatterns = [...new Set([...existingPatterns, ...patterns])];
+  let content: string;
+  if (begin === -1) {
+    const prefix = originalContent ?? '';
+    const separator =
+      prefix === '' ? '' : prefix.endsWith('\n\n') ? '' : prefix.endsWith('\n') ? '\n' : '\n\n';
+    content = `${prefix}${separator}${LOCAL_EXCLUDE_BEGIN}\n${managedPatterns.join('\n')}\n${LOCAL_EXCLUDE_END}\n`;
+  } else {
+    content = [
+      ...lines.slice(0, begin),
+      LOCAL_EXCLUDE_BEGIN,
+      ...managedPatterns,
+      LOCAL_EXCLUDE_END,
+      ...lines.slice(end + 1),
+    ].join('\n');
+  }
+  return {
+    absolutePath,
+    content: content === originalContent ? null : content,
+    originalContent,
+    mode: originalContent === null ? 0o644 : statSync(absolutePath).mode & 0o777,
+  };
+}
+
+function assertNoLocalExcludeBlock(commonGitDirectory: string): void {
+  const excludePath = path.join(commonGitDirectory, 'info', 'exclude');
+  const content = readTextFile(excludePath) ?? '';
+  if (content.split('\n').some((line) => line.trim() === LOCAL_EXCLUDE_BEGIN)) {
+    throw new SameTreeError(
+      'INVALID_INPUT',
+      'This Git clone still has SameTree local-only exclusions. Remove the managed block before repository setup.',
+      { path: excludePath },
+    );
+  }
+}
+
+function assertNoRepositoryInstructions(repositoryRoot: string): void {
+  const exposed: string[] = [];
+  const claudeInstructions = readTextFile(path.join(repositoryRoot, 'CLAUDE.md')) ?? '';
+  if (
+    markdownOutsideFences(claudeInstructions)
+      .split('\n')
+      .some((line) => line.trim() === '@.sametree/coordination.md')
+  ) {
+    exposed.push('CLAUDE.md');
+  }
+  const openCodeInstructions = readTextFile(path.join(repositoryRoot, 'AGENTS.md')) ?? '';
+  if (markdownOutsideFences(openCodeInstructions).includes('<!-- sametree:coordination -->')) {
+    exposed.push('AGENTS.md');
+  }
+  if (exposed.length > 0) {
+    throw new SameTreeError(
+      'INVALID_INPUT',
+      'Local-only setup found repository-visible SameTree instructions. Remove them before setup.',
+      { paths: exposed },
+    );
+  }
+}
+
+function assertLocallyIgnored(repositoryRoot: string, relativePaths: string[]): void {
+  const exposed: string[] = [];
+  for (const relativePath of [...new Set(relativePaths.map(gitPath))]) {
+    const result = spawnSync('git', ['check-ignore', '--no-index', '--quiet', '--', relativePath], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (result.status === 1) exposed.push(relativePath);
+    else if (result.status !== 0) {
+      throw new SameTreeError('GIT_STATUS_ERROR', 'Could not verify local setup exclusions.', {
+        path: relativePath,
+        stderr: result.stderr.trim(),
+        ...(result.error ? { cause: result.error.message } : {}),
+      });
+    }
+  }
+  if (exposed.length > 0) {
+    throw new SameTreeError(
+      'INVALID_INPUT',
+      'Git ignore rules expose files created by local-only setup.',
+      { paths: exposed },
+    );
+  }
+}
+
+function applyLocalExcludePlan(plan: LocalExcludePlan): boolean {
+  if (plan.content === null) return false;
+  if (readTextFile(plan.absolutePath) !== plan.originalContent) {
+    throw new SameTreeError(
+      'INVALID_INPUT',
+      'The Git local exclude file changed while setup was running; no update was applied.',
+    );
+  }
+  writeTextFileAtomic(plan.absolutePath, plan.content, plan.mode);
+  return true;
+}
+
+function restoreLocalExcludePlan(plan: LocalExcludePlan): boolean {
+  if (plan.content === null || readTextFile(plan.absolutePath) === plan.originalContent)
+    return true;
+  if (readTextFile(plan.absolutePath) !== plan.content) return false;
+  if (plan.originalContent === null) rmSync(plan.absolutePath, { force: true });
+  else writeTextFileAtomic(plan.absolutePath, plan.originalContent, plan.mode);
+  return true;
+}
+
+function acquireSetupLock(commonGitDirectory: string): () => void {
+  const lockDirectory = path.join(commonGitDirectory, 'sametree');
+  const lockPath = path.join(lockDirectory, 'setup.lock');
+  mkdirSync(lockDirectory, { recursive: true, mode: 0o700 });
+  const token = `${process.pid}:${Date.now()}:${randomUUID()}\n`;
+
+  let descriptor: number;
+  try {
+    descriptor = openSync(lockPath, 'wx', 0o600);
+  } catch (error) {
+    if (error instanceof Error && Reflect.get(error, 'code') === 'EEXIST') {
+      throw new SameTreeError(
+        'INVALID_INPUT',
+        'Another SameTree setup may be running in this Git clone. Remove the setup lock only after confirming no setup is active.',
+        { lockPath },
+      );
+    }
+    throw error;
+  }
+
+  try {
+    writeFileSync(descriptor, token, 'utf8');
+  } catch (error) {
+    closeSync(descriptor);
+    rmSync(lockPath, { force: true });
+    throw error;
+  }
+  closeSync(descriptor);
+  return () => {
+    if (readTextFile(lockPath) === token) rmSync(lockPath, { force: true });
+  };
 }
 
 function markdownOutsideFences(content: string): string {
@@ -329,7 +552,11 @@ function marketplaceUsesOfficialGithub(marketplace: Record<string, unknown>): bo
   return marketplace.source === 'github' && marketplace.repo === 'simozampa/sametree';
 }
 
-function preflightClaude(repositoryRoot: string, runner: ClaudeCommandRunner): ClaudePlan {
+function preflightClaude(
+  repositoryRoot: string,
+  runner: ClaudeCommandRunner,
+  localOnly: boolean,
+): ClaudePlan {
   const existing = runner(['mcp', 'get', 'sametree'], repositoryRoot);
   if (existing.status === 0 && !validClaudeServer(existing.stdout)) {
     throw new SameTreeError(
@@ -411,7 +638,7 @@ function preflightClaude(repositoryRoot: string, runner: ClaudeCommandRunner): C
     updatePlugin: plugin !== undefined && plugin.version !== VERSION,
     instructions: planInstructions(
       repositoryRoot,
-      'CLAUDE.md',
+      localOnly ? 'CLAUDE.local.md' : 'CLAUDE.md',
       '@.sametree/coordination.md',
       'prepend',
       (content) =>
@@ -558,7 +785,15 @@ function preflightOpenCodeTui(repositoryRoot: string): FilePlan {
   };
 }
 
-function preflightOpenCode(repositoryRoot: string): OpenCodePlan {
+function managedOpenCodeConfig(repositoryRoot: string, relativePath: string): boolean {
+  const content = readTextFile(path.join(repositoryRoot, relativePath));
+  if (content === null) return false;
+  const config = parseJsonc(content, relativePath);
+  const current = isRecord(config.mcp) ? config.mcp.sametree : undefined;
+  return configuredOpenCodeServer(current);
+}
+
+function selectOpenCodeConfigFile(repositoryRoot: string, localOnly: boolean): string {
   const jsonPath = path.join(repositoryRoot, 'opencode.json');
   const jsoncPath = path.join(repositoryRoot, 'opencode.jsonc');
   if (existsSync(jsonPath) && existsSync(jsoncPath)) {
@@ -568,7 +803,56 @@ function preflightOpenCode(repositoryRoot: string): OpenCodePlan {
     );
   }
 
-  const configFile = existsSync(jsoncPath) ? jsoncPath : jsonPath;
+  if (!localOnly) return existsSync(jsoncPath) ? jsoncPath : jsonPath;
+
+  const localJsonPath = path.join(repositoryRoot, LOCAL_OPENCODE_CONFIG_PATH);
+  const localJsoncPath = path.join(repositoryRoot, '.opencode', 'opencode.jsonc');
+  if (existsSync(localJsonPath) && existsSync(localJsoncPath)) {
+    throw new SameTreeError(
+      'INVALID_INPUT',
+      'Both .opencode/opencode.json and .opencode/opencode.jsonc exist; remove the unused configuration first.',
+    );
+  }
+  const existingLocalConfig = existsSync(localJsoncPath)
+    ? '.opencode/opencode.jsonc'
+    : existsSync(localJsonPath)
+      ? LOCAL_OPENCODE_CONFIG_PATH
+      : null;
+  if (existingLocalConfig) {
+    if (trackedFiles(repositoryRoot, [existingLocalConfig]).length > 0) {
+      throw new SameTreeError(
+        'INVALID_INPUT',
+        'Local-only setup cannot update paths already tracked by Git.',
+        { paths: [existingLocalConfig] },
+      );
+    }
+    if (!managedOpenCodeConfig(repositoryRoot, existingLocalConfig)) {
+      throw new SameTreeError(
+        'INVALID_INPUT',
+        `${existingLocalConfig} exists and is not managed by SameTree.`,
+      );
+    }
+    return path.join(repositoryRoot, existingLocalConfig);
+  }
+
+  const existingRootConfig = existsSync(jsoncPath)
+    ? 'opencode.jsonc'
+    : existsSync(jsonPath)
+      ? 'opencode.json'
+      : null;
+  if (
+    existingRootConfig &&
+    trackedFiles(repositoryRoot, [existingRootConfig]).length === 0 &&
+    managedOpenCodeConfig(repositoryRoot, existingRootConfig)
+  ) {
+    return path.join(repositoryRoot, existingRootConfig);
+  }
+  return localJsonPath;
+}
+
+function preflightOpenCode(repositoryRoot: string, localOnly: boolean): OpenCodePlan {
+  const configFile = selectOpenCodeConfigFile(repositoryRoot, localOnly);
+
   const relativePath = path.relative(repositoryRoot, configFile);
   const target = assertSafeWritePath(repositoryRoot, relativePath);
   const initial = `{
@@ -580,6 +864,17 @@ function preflightOpenCode(repositoryRoot: string): OpenCodePlan {
   if (config.mcp !== undefined && !isRecord(config.mcp)) {
     throw new SameTreeError('INVALID_INPUT', `${relativePath} must define mcp as an object.`);
   }
+  if (
+    localOnly &&
+    config.instructions !== undefined &&
+    (!Array.isArray(config.instructions) ||
+      config.instructions.some((instruction) => typeof instruction !== 'string'))
+  ) {
+    throw new SameTreeError(
+      'INVALID_INPUT',
+      `${relativePath} must define instructions as an array of strings.`,
+    );
+  }
   const current = isRecord(config.mcp) ? config.mcp.sametree : undefined;
   if (current !== undefined && !configuredOpenCodeServer(current)) {
     throw new SameTreeError(
@@ -590,23 +885,45 @@ function preflightOpenCode(repositoryRoot: string): OpenCodePlan {
   const timeoutNeedsUpdate =
     isRecord(current) &&
     (current.timeout === undefined || Number(current.timeout) < OPENCODE_MCP_TIMEOUT_MS);
-
-  const updated =
+  const mcpStatus =
     current === undefined
-      ? applyEdits(
-          content,
-          modify(content, ['mcp', 'sametree'], OPENCODE_SERVER, {
-            formattingOptions: { tabSize: 2, insertSpaces: true, eol: '\n' },
-          }),
-        )
+      ? ('added' as const)
       : timeoutNeedsUpdate
-        ? applyEdits(
-            content,
-            modify(content, ['mcp', 'sametree', 'timeout'], OPENCODE_MCP_TIMEOUT_MS, {
-              formattingOptions: { tabSize: 2, insertSpaces: true, eol: '\n' },
-            }),
-          )
-        : null;
+        ? ('updated' as const)
+        : ('existing' as const);
+  const localInstructions = Array.isArray(config.instructions) ? config.instructions : [];
+  const localInstructionsConfigured = localInstructions.some(
+    (instruction) =>
+      typeof instruction === 'string' &&
+      instruction.replace(/^\.\//u, '') === LOCAL_INSTRUCTION_PATH,
+  );
+
+  const formattingOptions = { tabSize: 2, insertSpaces: true, eol: '\n' };
+  let updated = content;
+  if (current === undefined) {
+    updated = applyEdits(
+      updated,
+      modify(updated, ['mcp', 'sametree'], OPENCODE_SERVER, { formattingOptions }),
+    );
+  } else if (timeoutNeedsUpdate) {
+    updated = applyEdits(
+      updated,
+      modify(updated, ['mcp', 'sametree', 'timeout'], OPENCODE_MCP_TIMEOUT_MS, {
+        formattingOptions,
+      }),
+    );
+  }
+  if (localOnly && !localInstructionsConfigured) {
+    updated = applyEdits(
+      updated,
+      modify(
+        updated,
+        config.instructions === undefined ? ['instructions'] : ['instructions', -1],
+        config.instructions === undefined ? [LOCAL_INSTRUCTION_PATH] : LOCAL_INSTRUCTION_PATH,
+        { formattingOptions },
+      ),
+    );
+  }
   const pluginTarget = assertSafeWritePath(repositoryRoot, OPENCODE_PLUGIN_PATH);
   const pluginOriginal = readTextFile(pluginTarget);
   if (pluginOriginal !== null && !pluginOriginal.startsWith('// Generated by SameTree.')) {
@@ -623,18 +940,27 @@ function preflightOpenCode(repositoryRoot: string): OpenCodePlan {
       `${OPENCODE_PLAN_PLUGIN_PATH} exists and is not managed by SameTree.`,
     );
   }
+  const instructions = localOnly
+    ? null
+    : planManagedInstructions(repositoryRoot, 'AGENTS.md', AGENT_INSTRUCTIONS, [
+        LEGACY_AGENT_INSTRUCTIONS,
+        PLAN_AGENT_INSTRUCTIONS,
+      ]);
 
   return {
     config: {
       relativePath,
-      status: current === undefined ? 'added' : timeoutNeedsUpdate ? 'updated' : 'existing',
-      content: updated,
+      status: originalContent === null ? 'added' : updated === content ? 'existing' : 'updated',
+      content: updated === content ? null : updated,
       originalContent,
     },
-    instructions: planManagedInstructions(repositoryRoot, 'AGENTS.md', AGENT_INSTRUCTIONS, [
-      LEGACY_AGENT_INSTRUCTIONS,
-      PLAN_AGENT_INSTRUCTIONS,
-    ]),
+    mcpStatus,
+    instructions,
+    instructionsStatus: localOnly
+      ? localInstructionsConfigured
+        ? 'existing'
+        : 'added'
+      : (instructions?.status ?? 'existing'),
     plugin: {
       relativePath: OPENCODE_PLUGIN_PATH,
       status:
@@ -1042,6 +1368,7 @@ export function setupProject(
   options: {
     claude?: boolean;
     opencode?: boolean;
+    local?: boolean;
     claudeRunner?: ClaudeCommandRunner;
   } = {},
 ): SetupResult {
@@ -1054,100 +1381,143 @@ export function setupProject(
 
   assertDatabaseRuntimeCompatible();
   const repository = resolveRepository(cwd);
-  const runner = options.claudeRunner ?? defaultClaudeRunner;
-  const claudePlan = options.claude ? preflightClaude(repository.root, runner) : null;
-  const openCodePlan = options.opencode ? preflightOpenCode(repository.root) : null;
-  const touched = [
-    ...INITIALIZATION_FILES,
-    ...(claudePlan ? [claudePlan.instructions.relativePath] : []),
-    ...(openCodePlan
-      ? [
-          openCodePlan.config.relativePath,
-          openCodePlan.instructions.relativePath,
-          openCodePlan.plugin.relativePath,
-          openCodePlan.planPlugin.relativePath,
-          openCodePlan.tuiConfig.relativePath,
-        ]
-      : []),
-  ];
-  const snapshots = snapshotFiles(repository.root, touched);
-  const expectedWrites = new Map<string, string>();
-  const createdDirectories: string[] = [];
-  let claudeServerAdded = false;
-
+  const localOnly = options.local ?? false;
+  const releaseSetupLock = acquireSetupLock(repository.commonGitDirectory);
   try {
-    createSetupDirectories(
-      repository.root,
-      [...SETUP_DIRECTORIES, ...(openCodePlan ? OPENCODE_PLUGIN_DIRECTORIES : [])],
-      createdDirectories,
-    );
-    const initialization = initializeProjectTracked(repository.root, (relativePath, content) =>
-      expectedWrites.set(relativePath, content),
-    );
-    if (openCodePlan) {
-      applyFilePlan(repository.root, openCodePlan.config, expectedWrites);
-      applyFilePlan(repository.root, openCodePlan.instructions, expectedWrites);
-      applyFilePlan(repository.root, openCodePlan.plugin, expectedWrites);
-      applyFilePlan(repository.root, openCodePlan.planPlugin, expectedWrites);
-      applyFilePlan(repository.root, openCodePlan.tuiConfig, expectedWrites);
-    }
-    if (claudePlan) applyFilePlan(repository.root, claudePlan.instructions, expectedWrites);
-    if (claudePlan?.addMcp) {
-      addClaudeServer(repository.root, runner);
-      claudeServerAdded = true;
-    }
-    if (claudePlan) configureClaudePlugin(repository.root, claudePlan, runner);
-
-    return {
-      repositoryRoot: repository.root,
-      initialization,
-      ...(claudePlan
-        ? {
-            claude: {
-              mcp: claudePlan.addMcp ? ('added' as const) : ('existing' as const),
-              instructions: claudePlan.instructions.status,
-              plugin: claudePlan.pluginExists
-                ? claudePlan.updatePlugin
-                  ? ('updated' as const)
-                  : ('existing' as const)
-                : ('added' as const),
-            },
-          }
-        : {}),
+    if (!localOnly) assertNoLocalExcludeBlock(repository.commonGitDirectory);
+    if (localOnly) assertNoRepositoryInstructions(repository.root);
+    const runner = options.claudeRunner ?? defaultClaudeRunner;
+    const claudePlan = options.claude ? preflightClaude(repository.root, runner, localOnly) : null;
+    const openCodePlan = options.opencode ? preflightOpenCode(repository.root, localOnly) : null;
+    const touched = [
+      ...INITIALIZATION_FILES,
+      ...(claudePlan ? [claudePlan.instructions.relativePath] : []),
       ...(openCodePlan
-        ? {
-            opencode: {
-              configFile: openCodePlan.config.relativePath,
-              planPluginFile: openCodePlan.planPlugin.relativePath,
-              tuiConfigFile: openCodePlan.tuiConfig.relativePath,
-              mcp: openCodePlan.config.status,
-              instructions: openCodePlan.instructions.status,
-              planPlugin: openCodePlan.planPlugin.status,
-              plugin: openCodePlan.plugin.status,
-            },
-          }
-        : {}),
-      restartCommands: [...(claudePlan ? ['claude'] : []), ...(openCodePlan ? ['opencode'] : [])],
-    };
-  } catch (error) {
-    const claudeCleanup = claudeServerAdded
-      ? runner(['mcp', 'remove', '--scope', 'local', 'sametree'], repository.root)
-      : undefined;
-    const rollbackIssues = [
-      ...(claudeCleanup && claudeCleanup.status !== 0 ? ['Claude MCP registration'] : []),
-      ...restoreFiles(repository.root, snapshots, expectedWrites),
-      ...removeCreatedDirectories(repository.root, createdDirectories),
+        ? [
+            openCodePlan.config.relativePath,
+            ...(openCodePlan.instructions ? [openCodePlan.instructions.relativePath] : []),
+            openCodePlan.plugin.relativePath,
+            openCodePlan.planPlugin.relativePath,
+            openCodePlan.tuiConfig.relativePath,
+          ]
+        : []),
     ];
-    if (rollbackIssues.length > 0) {
-      throw new SameTreeError(
-        'INVALID_INPUT',
-        'Setup failed and rollback preserved files that changed or became unsafe.',
-        {
-          paths: rollbackIssues,
-          cause: error instanceof Error ? error.message : String(error),
-        },
-      );
+    if (localOnly) {
+      const tracked = trackedFiles(repository.root, [...new Set(touched)]);
+      if (tracked.length > 0) {
+        throw new SameTreeError(
+          'INVALID_INPUT',
+          'Local-only setup cannot update paths already tracked by Git.',
+          { paths: tracked },
+        );
+      }
     }
-    throw error;
+    const localExcludePatterns = [
+      '/.sametree/',
+      ...(claudePlan ? ['/CLAUDE.local.md'] : []),
+      ...(openCodePlan
+        ? [
+            `/${gitPath(openCodePlan.config.relativePath)}`,
+            `/${gitPath(openCodePlan.plugin.relativePath)}`,
+            `/${gitPath(openCodePlan.planPlugin.relativePath)}`,
+            `/${gitPath(openCodePlan.tuiConfig.relativePath)}`,
+          ]
+        : []),
+    ];
+    const localExcludePlan = localOnly
+      ? preflightLocalExcludes(repository.commonGitDirectory, localExcludePatterns)
+      : null;
+    const snapshots = snapshotFiles(repository.root, touched);
+    const expectedWrites = new Map<string, string>();
+    const createdDirectories: string[] = [];
+    let claudeServerAdded = false;
+    let localExcludesWritten = false;
+
+    try {
+      if (localExcludePlan) localExcludesWritten = applyLocalExcludePlan(localExcludePlan);
+      createSetupDirectories(
+        repository.root,
+        [...SETUP_DIRECTORIES, ...(openCodePlan ? OPENCODE_PLUGIN_DIRECTORIES : [])],
+        createdDirectories,
+      );
+      const initialization = initializeProjectTracked(repository.root, (relativePath, content) =>
+        expectedWrites.set(relativePath, content),
+      );
+      if (openCodePlan) {
+        applyFilePlan(repository.root, openCodePlan.config, expectedWrites);
+        if (openCodePlan.instructions) {
+          applyFilePlan(repository.root, openCodePlan.instructions, expectedWrites);
+        }
+        applyFilePlan(repository.root, openCodePlan.plugin, expectedWrites);
+        applyFilePlan(repository.root, openCodePlan.planPlugin, expectedWrites);
+        applyFilePlan(repository.root, openCodePlan.tuiConfig, expectedWrites);
+      }
+      if (claudePlan) applyFilePlan(repository.root, claudePlan.instructions, expectedWrites);
+      if (localOnly) assertLocallyIgnored(repository.root, touched);
+      if (claudePlan?.addMcp) {
+        addClaudeServer(repository.root, runner);
+        claudeServerAdded = true;
+      }
+      if (claudePlan) configureClaudePlugin(repository.root, claudePlan, runner);
+
+      return {
+        repositoryRoot: repository.root,
+        initialization,
+        ...(claudePlan
+          ? {
+              claude: {
+                mcp: claudePlan.addMcp ? ('added' as const) : ('existing' as const),
+                instructions: claudePlan.instructions.status,
+                plugin: claudePlan.pluginExists
+                  ? claudePlan.updatePlugin
+                    ? ('updated' as const)
+                    : ('existing' as const)
+                  : ('added' as const),
+              },
+            }
+          : {}),
+        ...(openCodePlan
+          ? {
+              opencode: {
+                configFile: openCodePlan.config.relativePath,
+                planPluginFile: openCodePlan.planPlugin.relativePath,
+                tuiConfigFile: openCodePlan.tuiConfig.relativePath,
+                mcp: openCodePlan.mcpStatus,
+                instructions: openCodePlan.instructionsStatus,
+                planPlugin: openCodePlan.planPlugin.status,
+                plugin: openCodePlan.plugin.status,
+              },
+            }
+          : {}),
+        restartCommands: [...(claudePlan ? ['claude'] : []), ...(openCodePlan ? ['opencode'] : [])],
+      };
+    } catch (error) {
+      const claudeCleanup = claudeServerAdded
+        ? runner(['mcp', 'remove', '--scope', 'local', 'sametree'], repository.root)
+        : undefined;
+      const rollbackIssues = [
+        ...(claudeCleanup && claudeCleanup.status !== 0 ? ['Claude MCP registration'] : []),
+        ...restoreFiles(repository.root, snapshots, expectedWrites),
+        ...removeCreatedDirectories(repository.root, createdDirectories),
+      ];
+      if (localExcludesWritten && localExcludePlan) {
+        if (rollbackIssues.length > 0) rollbackIssues.push('Git local excludes preserved');
+        else if (!restoreLocalExcludePlan(localExcludePlan))
+          rollbackIssues.push('Git local excludes');
+      }
+      if (rollbackIssues.length > 0) {
+        throw new SameTreeError(
+          'INVALID_INPUT',
+          'Setup failed and rollback preserved files that changed or became unsafe.',
+          {
+            paths: rollbackIssues,
+            cause: error instanceof Error ? error.message : String(error),
+          },
+        );
+      }
+      throw error;
+    }
+  } finally {
+    releaseSetupLock();
   }
 }
