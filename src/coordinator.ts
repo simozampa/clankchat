@@ -1154,6 +1154,61 @@ export class Coordinator {
     });
   }
 
+  recoverLeasesFromExpiredSession(expiredSessionId: string): { claims: number; tasks: number } {
+    const now = this.#clock();
+    return immediateTransaction(this.#database, () => {
+      this.#assertActiveSession(now);
+      const expired = this.#database
+        .prepare(
+          'SELECT agent_name, home_worktree_id, status, expires_at FROM sessions WHERE id = ?',
+        )
+        .get(expiredSessionId) as Row | undefined;
+      if (
+        !expired ||
+        stringValue(expired, 'agent_name') !== this.agentName ||
+        stringValue(expired, 'home_worktree_id') !== this.worktreeId ||
+        stringValue(expired, 'status') !== 'active' ||
+        numberValue(expired, 'expires_at') > now
+      ) {
+        throw new SameTreeError(
+          'TASK_UNAVAILABLE',
+          'The previous session is not an expired session owned by this agent.',
+        );
+      }
+
+      const claims = this.#database
+        .prepare(
+          `UPDATE path_claims SET session_id = ?, expires_at = ?
+           WHERE session_id = ? AND agent_name = ? AND expires_at > ?
+             AND EXISTS (
+               SELECT 1 FROM worktrees
+               WHERE worktrees.id = path_claims.worktree_id AND worktrees.available = 1
+             )`,
+        )
+        .run(
+          this.sessionId,
+          now + this.config.claimTtlSeconds * 1_000,
+          expiredSessionId,
+          this.agentName,
+          now,
+        ).changes;
+      const tasks = this.#database
+        .prepare(
+          `UPDATE tasks SET claimed_by_session = ?, lease_expires_at = ?
+           WHERE claimed_by_session = ? AND assignee = ?
+             AND status = 'in_progress' AND lease_expires_at > ?`,
+        )
+        .run(
+          this.sessionId,
+          now + this.config.taskLeaseSeconds * 1_000,
+          expiredSessionId,
+          this.agentName,
+          now,
+        ).changes;
+      return { claims, tasks };
+    });
+  }
+
   close(options: { releaseClaims?: boolean } = {}): void {
     if (this.#closed) return;
     try {

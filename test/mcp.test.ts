@@ -8,9 +8,11 @@ import {
   getDefaultEnvironment,
   StdioClientTransport,
 } from '@modelcontextprotocol/sdk/client/stdio.js';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { Coordinator } from '../src/coordinator.js';
+import { resolveRepository } from '../src/git.js';
 import { addWorkspaceMember, createWorkspace } from '../src/workspace-service.js';
 import { createTestRepository, type TestRepository } from './helpers.js';
 
@@ -101,6 +103,81 @@ describe('MCP server', () => {
     const content = response.content as Array<{ text?: string; type: string }>;
     const text = content.find((item) => item.type === 'text')?.text;
     expect(text).not.toContain('\n');
+  });
+
+  it('replaces an expired session and retries the interrupted tool call', async () => {
+    const repository = createTestRepository();
+    repositories.push(repository);
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [mcpPath],
+      cwd: repository.root,
+      env: {
+        ...getDefaultEnvironment(),
+        SAMETREE_AGENT: 'mcp-sleeper',
+        SAMETREE_HARNESS: 'opencode',
+      },
+      stderr: 'pipe',
+    });
+    const client = new Client({ name: 'sametree-test', version: '1.0.0' });
+    clients.push(client);
+    await client.connect(transport);
+
+    const firstHeartbeat = await client.callTool({ name: 'sametree_heartbeat', arguments: {} });
+    const firstSession = firstHeartbeat.structuredContent as { result: { id: string } };
+    const taskCreated = await client.callTool({
+      name: 'sametree_task_create',
+      arguments: { title: 'Continue after sleep' },
+    });
+    const task = taskCreated.structuredContent as { result: { id: string } };
+    await client.callTool({
+      name: 'sametree_task_claim',
+      arguments: { taskId: task.result.id },
+    });
+    const acquired = await client.callTool({
+      name: 'sametree_claim_acquire',
+      arguments: {
+        paths: [{ path: 'src/suspended.ts' }, { path: 'src/already-expired.ts' }],
+      },
+    });
+    expect(acquired.isError).not.toBe(true);
+    const database = new Database(resolveRepository(repository.root).databasePath);
+    const nearExpiry = Date.now() + 1_000;
+    database.prepare('UPDATE sessions SET expires_at = 0 WHERE id = ?').run(firstSession.result.id);
+    database
+      .prepare('UPDATE path_claims SET expires_at = 0 WHERE session_id = ? AND path = ?')
+      .run(firstSession.result.id, 'src/already-expired.ts');
+    database
+      .prepare('UPDATE path_claims SET expires_at = ? WHERE session_id = ? AND path = ?')
+      .run(nearExpiry, firstSession.result.id, 'src/suspended.ts');
+    database
+      .prepare('UPDATE tasks SET lease_expires_at = ? WHERE claimed_by_session = ?')
+      .run(nearExpiry, firstSession.result.id);
+    database.close();
+
+    const recovered = await client.callTool({ name: 'sametree_heartbeat', arguments: {} });
+    const recoveredSession = recovered.structuredContent as { result: { id: string } };
+    const claims = await client.callTool({ name: 'sametree_claim_list', arguments: {} });
+    const verification = new Database(resolveRepository(repository.root).databasePath, {
+      readonly: true,
+    });
+    const recoveredClaim = verification
+      .prepare('SELECT session_id, expires_at FROM path_claims WHERE path = ?')
+      .get('src/suspended.ts') as { expires_at: number; session_id: string };
+    const recoveredTask = verification
+      .prepare('SELECT claimed_by_session, lease_expires_at FROM tasks WHERE id = ?')
+      .get(task.result.id) as { claimed_by_session: string; lease_expires_at: number };
+    verification.close();
+
+    expect(recovered.isError).not.toBe(true);
+    expect(recoveredSession.result.id).not.toBe(firstSession.result.id);
+    expect(recoveredClaim.session_id).toBe(recoveredSession.result.id);
+    expect(recoveredClaim.expires_at).toBeGreaterThan(nearExpiry);
+    expect(recoveredTask.claimed_by_session).toBe(recoveredSession.result.id);
+    expect(recoveredTask.lease_expires_at).toBeGreaterThan(nearExpiry);
+    expect(claims.structuredContent).toMatchObject({
+      result: [expect.objectContaining({ path: 'src/suspended.ts' })],
+    });
   });
 
   it('publishes and reads proposed plans over MCP', async () => {
