@@ -195,6 +195,57 @@ describe('MCP server', () => {
     });
   });
 
+  it('recovers concurrent clients before post-sleep tool calls', async () => {
+    const repository = createTestRepository();
+    repositories.push(repository);
+    const agents = ['wake-agent-1', 'wake-agent-2', 'wake-agent-3', 'wake-agent-4'];
+    const connected = await Promise.all(
+      agents.map(async (agent) => {
+        const transport = new StdioClientTransport({
+          command: process.execPath,
+          args: [mcpPath],
+          cwd: repository.root,
+          env: {
+            ...getDefaultEnvironment(),
+            SAMETREE_AGENT: agent,
+            SAMETREE_HARNESS: 'opencode',
+          },
+          stderr: 'pipe',
+        });
+        const client = new Client({ name: `sametree-${agent}`, version: '1.0.0' });
+        clients.push(client);
+        await client.connect(transport);
+        const heartbeat = await client.callTool({ name: 'sametree_heartbeat', arguments: {} });
+        const session = heartbeat.structuredContent as { result: { id: string } };
+        return { client, sessionId: session.result.id };
+      }),
+    );
+    const databasePath = resolveRepository(repository.root).databasePath;
+    const database = new Database(databasePath);
+    const expire = database.prepare('UPDATE sessions SET expires_at = 0 WHERE id = ?');
+    for (const { sessionId } of connected) expire.run(sessionId);
+    database.close();
+
+    const responses = await Promise.all(
+      connected.map(({ client }) => client.callTool({ name: 'sametree_status', arguments: {} })),
+    );
+    const verification = new Database(databasePath, { readonly: true });
+    const replacements = verification
+      .prepare(
+        `SELECT agent_name, COUNT(*) AS count
+         FROM sessions
+         WHERE status = 'active' AND expires_at > ? AND agent_name IN (?, ?, ?, ?)
+         GROUP BY agent_name`,
+      )
+      .all(Date.now(), ...agents) as Array<{ agent_name: string; count: number }>;
+    verification.close();
+
+    expect(responses.every((response) => response.isError !== true)).toBe(true);
+    expect(replacements).toHaveLength(agents.length);
+    expect(replacements.every(({ count }) => count === 1)).toBe(true);
+    expect(replacements.map(({ agent_name }) => agent_name).sort()).toEqual(agents);
+  });
+
   it('publishes and reads proposed plans over MCP', async () => {
     const repository = createTestRepository();
     repositories.push(repository);
