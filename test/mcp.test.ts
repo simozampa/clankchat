@@ -105,7 +105,7 @@ describe('MCP server', () => {
     expect(text).not.toContain('\n');
   });
 
-  it('replaces an expired session and retries the interrupted tool call', async () => {
+  it('replaces an expired session before the first tool call after sleep', async () => {
     const repository = createTestRepository();
     repositories.push(repository);
     const transport = new StdioClientTransport({
@@ -155,6 +155,18 @@ describe('MCP server', () => {
       .run(nearExpiry, firstSession.result.id);
     database.close();
 
+    const status = await client.callTool({ name: 'sametree_status', arguments: {} });
+    const afterStatus = new Database(resolveRepository(repository.root).databasePath, {
+      readonly: true,
+    });
+    const preflightSession = afterStatus
+      .prepare(
+        `SELECT id FROM sessions
+         WHERE agent_name = ? AND status = 'active' AND expires_at > ?
+         ORDER BY started_at DESC LIMIT 1`,
+      )
+      .get('mcp-sleeper', Date.now()) as { id: string };
+    afterStatus.close();
     const recovered = await client.callTool({ name: 'sametree_heartbeat', arguments: {} });
     const recoveredSession = recovered.structuredContent as { result: { id: string } };
     const claims = await client.callTool({ name: 'sametree_claim_list', arguments: {} });
@@ -169,7 +181,10 @@ describe('MCP server', () => {
       .get(task.result.id) as { claimed_by_session: string; lease_expires_at: number };
     verification.close();
 
+    expect(status.isError).not.toBe(true);
     expect(recovered.isError).not.toBe(true);
+    expect(preflightSession.id).not.toBe(firstSession.result.id);
+    expect(recoveredSession.result.id).toBe(preflightSession.id);
     expect(recoveredSession.result.id).not.toBe(firstSession.result.id);
     expect(recoveredClaim.session_id).toBe(recoveredSession.result.id);
     expect(recoveredClaim.expires_at).toBeGreaterThan(nearExpiry);
