@@ -2,6 +2,15 @@
 
 SameTree is pre-1.0 alpha software. Back up coordination state before upgrades and do not mix versions against the same database.
 
+## Upgrade To 0.1.5
+
+Version 0.1.5 preflights MCP session recovery before every tool call. The first read-only or lease-sensitive request after system sleep replaces an expired session before the harness can render `TASK_UNAVAILABLE`.
+
+1. Stop every Claude Code, OpenCode, SameTree MCP, watcher, and message follower process using the coordination database.
+2. Install `npm install --global sametree@0.1.5 --force` from your normal Node.js shell.
+3. Rerun `sametree setup --claude --opencode`, adding `--local` for personal-only coordination and omitting unused harnesses.
+4. Restart every Claude Code and OpenCode process.
+
 ## Upgrade To 0.1.4
 
 Version 0.1.4 includes the 0.1.3 local-only setup and sleep-recovery changes while correcting the packaged Claude Code plugin metadata. Install `0.1.4` instead of `0.1.3` so Claude Code can verify and load the matching plugin version without a duplicate hooks registration.
