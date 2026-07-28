@@ -85,6 +85,16 @@ function recoverExpiredSession(): void {
   }
 }
 
+function withSessionRecovery<T>(operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    if (!sessionExpired(error)) throw error;
+    recoverExpiredSession();
+    return operation();
+  }
+}
+
 function claimReceipts(claims: PathClaim[]) {
   return claims.map(({ id, member, path, kind, expiresAt, warnings }) => ({
     id,
@@ -98,18 +108,12 @@ function claimReceipts(claims: PathClaim[]) {
 
 function execute(operation: () => unknown) {
   try {
-    return result(operation());
+    // Read-only coordinator methods do not assert session liveness. Preflight every tool call so
+    // the first request after system sleep replaces the expired session before doing any work.
+    withSessionRecovery(() => coordinator.heartbeat());
+    return result(withSessionRecovery(operation));
   } catch (error) {
-    let failure = error;
-    if (sessionExpired(error)) {
-      try {
-        recoverExpiredSession();
-        return result(operation());
-      } catch (recoveryError) {
-        failure = recoveryError;
-      }
-    }
-    const value = errorResult(failure);
+    const value = errorResult(error);
     return { ...result(value), isError: true };
   }
 }
@@ -669,17 +673,8 @@ server.registerResource(
 
 const heartbeat = setInterval(() => {
   try {
-    coordinator.heartbeat();
+    withSessionRecovery(() => coordinator.heartbeat());
   } catch (error) {
-    if (sessionExpired(error)) {
-      try {
-        recoverExpiredSession();
-        return;
-      } catch (recoveryError) {
-        process.stderr.write(`SameTree session recovery failed: ${String(recoveryError)}\n`);
-        return;
-      }
-    }
     process.stderr.write(`SameTree heartbeat failed: ${String(error)}\n`);
   }
 }, 20_000);

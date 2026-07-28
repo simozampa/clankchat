@@ -105,7 +105,7 @@ describe('MCP server', () => {
     expect(text).not.toContain('\n');
   });
 
-  it('replaces an expired session and retries the interrupted tool call', async () => {
+  it('replaces an expired session before the first tool call after sleep', async () => {
     const repository = createTestRepository();
     repositories.push(repository);
     const transport = new StdioClientTransport({
@@ -155,6 +155,18 @@ describe('MCP server', () => {
       .run(nearExpiry, firstSession.result.id);
     database.close();
 
+    const status = await client.callTool({ name: 'sametree_status', arguments: {} });
+    const afterStatus = new Database(resolveRepository(repository.root).databasePath, {
+      readonly: true,
+    });
+    const preflightSession = afterStatus
+      .prepare(
+        `SELECT id FROM sessions
+         WHERE agent_name = ? AND status = 'active' AND expires_at > ?
+         ORDER BY started_at DESC LIMIT 1`,
+      )
+      .get('mcp-sleeper', Date.now()) as { id: string };
+    afterStatus.close();
     const recovered = await client.callTool({ name: 'sametree_heartbeat', arguments: {} });
     const recoveredSession = recovered.structuredContent as { result: { id: string } };
     const claims = await client.callTool({ name: 'sametree_claim_list', arguments: {} });
@@ -169,7 +181,10 @@ describe('MCP server', () => {
       .get(task.result.id) as { claimed_by_session: string; lease_expires_at: number };
     verification.close();
 
+    expect(status.isError).not.toBe(true);
     expect(recovered.isError).not.toBe(true);
+    expect(preflightSession.id).not.toBe(firstSession.result.id);
+    expect(recoveredSession.result.id).toBe(preflightSession.id);
     expect(recoveredSession.result.id).not.toBe(firstSession.result.id);
     expect(recoveredClaim.session_id).toBe(recoveredSession.result.id);
     expect(recoveredClaim.expires_at).toBeGreaterThan(nearExpiry);
@@ -178,6 +193,57 @@ describe('MCP server', () => {
     expect(claims.structuredContent).toMatchObject({
       result: [expect.objectContaining({ path: 'src/suspended.ts' })],
     });
+  });
+
+  it('recovers concurrent clients before post-sleep tool calls', async () => {
+    const repository = createTestRepository();
+    repositories.push(repository);
+    const agents = ['wake-agent-1', 'wake-agent-2', 'wake-agent-3', 'wake-agent-4'];
+    const connected = await Promise.all(
+      agents.map(async (agent) => {
+        const transport = new StdioClientTransport({
+          command: process.execPath,
+          args: [mcpPath],
+          cwd: repository.root,
+          env: {
+            ...getDefaultEnvironment(),
+            SAMETREE_AGENT: agent,
+            SAMETREE_HARNESS: 'opencode',
+          },
+          stderr: 'pipe',
+        });
+        const client = new Client({ name: `sametree-${agent}`, version: '1.0.0' });
+        clients.push(client);
+        await client.connect(transport);
+        const heartbeat = await client.callTool({ name: 'sametree_heartbeat', arguments: {} });
+        const session = heartbeat.structuredContent as { result: { id: string } };
+        return { client, sessionId: session.result.id };
+      }),
+    );
+    const databasePath = resolveRepository(repository.root).databasePath;
+    const database = new Database(databasePath);
+    const expire = database.prepare('UPDATE sessions SET expires_at = 0 WHERE id = ?');
+    for (const { sessionId } of connected) expire.run(sessionId);
+    database.close();
+
+    const responses = await Promise.all(
+      connected.map(({ client }) => client.callTool({ name: 'sametree_status', arguments: {} })),
+    );
+    const verification = new Database(databasePath, { readonly: true });
+    const replacements = verification
+      .prepare(
+        `SELECT agent_name, COUNT(*) AS count
+         FROM sessions
+         WHERE status = 'active' AND expires_at > ? AND agent_name IN (?, ?, ?, ?)
+         GROUP BY agent_name`,
+      )
+      .all(Date.now(), ...agents) as Array<{ agent_name: string; count: number }>;
+    verification.close();
+
+    expect(responses.every((response) => response.isError !== true)).toBe(true);
+    expect(replacements).toHaveLength(agents.length);
+    expect(replacements.every(({ count }) => count === 1)).toBe(true);
+    expect(replacements.map(({ agent_name }) => agent_name).sort()).toEqual(agents);
   });
 
   it('publishes and reads proposed plans over MCP', async () => {
