@@ -14,6 +14,10 @@ Include the affected version, operating system, reproduction steps, impact, and 
 
 SameTree protects its own state against malformed inputs, accidental path escapes, and conflicting transactional updates. It is not a sandbox or authorization system.
 
+The shipped Claude Code and OpenCode integrations fail closed before recognized tool calls can leave the worktree where the harness launched. They canonicalize structured paths and effective working directories, reject symbolic-link and nested-repository escapes, and block explicit shell directory changes, external path operands, dynamic expansion, Git context overrides, worktree creation, branch switching, and branch integration commands. A workspace may share coordination across members, but it does not expand an individual harness process's filesystem boundary.
+
+This guard is cooperative preflight validation, not process isolation. It cannot inspect the behavior of an opaque executable, script, package lifecycle command, compiler plugin, or child process after launch. Same-user time-of-check/time-of-use changes can also replace paths after validation. Use operating-system sandboxing when commands themselves are not trusted.
+
 Processes running as the same operating-system user can:
 
 - Write source files without acquiring a claim.
@@ -21,6 +25,7 @@ Processes running as the same operating-system user can:
 - Impersonate another agent name.
 - Bypass Git hooks with `--no-verify`.
 - Modify repository policy and hook files.
+- Disable, replace, or bypass the harness worktree guard and invoke opaque programs that write elsewhere.
 - Invoke shared-instruction CLI/library APIs with `userAuthorized: true` or modify harness capture plugins.
 
 Do not use SameTree to coordinate mutually hostile agents. Use separate operating-system accounts, containers, or worktrees when isolation is required.

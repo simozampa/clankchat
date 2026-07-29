@@ -28,6 +28,7 @@ import {
   workspaceMembers,
   workspaceStatus,
 } from './workspace-service.js';
+import { assertWorktreeBoundary } from './worktree-guard.js';
 
 interface GlobalOptions {
   agent?: string;
@@ -1063,6 +1064,10 @@ hooks.command('install').action((_options: unknown, command: Command) => {
 });
 
 const hook = program.command('hook', { hidden: true });
+hook.command('worktree-guard').action((_options: unknown, command: Command) => {
+  const globals = command.optsWithGlobals<GlobalOptions>();
+  assertWorktreeBoundary(globals.cwd, objectJson(readFileSync(0, 'utf8')));
+});
 hook.command('pre-commit').action((_options: unknown, command: Command) => {
   runWithCoordinator(command, (coordinator) =>
     checkPreCommit(

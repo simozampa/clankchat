@@ -387,6 +387,117 @@ describe('harness adapters', () => {
     expect(plugin).not.toHaveProperty('event');
   });
 
+  it('preflights OpenCode path tools and resolved shell directories', async () => {
+    const module = (await import(
+      `data:text/javascript;base64,${Buffer.from(OPENCODE_PLAN_PLUGIN).toString('base64')}`
+    )) as {
+      SameTreePlanPublisher: (input: Record<string, unknown>) => Promise<{
+        'shell.env': (input: Record<string, unknown>) => Promise<void>;
+        'tool.execute.before': (
+          input: Record<string, unknown>,
+          output: Record<string, unknown>,
+        ) => Promise<void>;
+      }>;
+    };
+    const spawnArguments: string[][] = [];
+    const payloads: Array<Record<string, unknown>> = [];
+    Reflect.set(globalThis, 'Bun', {
+      spawn: (args: string[]) => {
+        spawnArguments.push(args);
+        let input = '';
+        return {
+          stdin: {
+            write: (value: string) => {
+              input += value;
+            },
+            end: () => payloads.push(JSON.parse(input) as Record<string, unknown>),
+          },
+          stdout: new ReadableStream({ start: (stream) => stream.close() }),
+          stderr: new ReadableStream({ start: (stream) => stream.close() }),
+          exited: Promise.resolve(0),
+          kill: () => undefined,
+        };
+      },
+    });
+    const plugin = await module.SameTreePlanPublisher({
+      client: {},
+      directory: '/workspace/packages/app',
+      worktree: '/workspace',
+    });
+
+    await plugin['tool.execute.before'](
+      { tool: 'read', sessionID: 'session-root', callID: 'call-read' },
+      { args: { filePath: '/tmp/other/file.ts' } },
+    );
+    await plugin['tool.execute.before'](
+      { tool: 'custom', sessionID: 'session-root', callID: 'call-custom' },
+      { args: { repository_path: '/tmp/other' } },
+    );
+    await plugin['shell.env']({ cwd: '/tmp/other' });
+
+    expect(spawnArguments).toEqual([
+      expect.arrayContaining(['--cwd', '/workspace', 'hook', 'worktree-guard']),
+      expect.arrayContaining(['--cwd', '/workspace', 'hook', 'worktree-guard']),
+      expect.arrayContaining(['--cwd', '/workspace', 'hook', 'worktree-guard']),
+    ]);
+    expect(payloads).toEqual([
+      expect.objectContaining({
+        hook_event_name: 'OpenCodeToolExecuteBefore',
+        tool_name: 'read',
+        tool_input: { filePath: '/tmp/other/file.ts' },
+      }),
+      expect.objectContaining({
+        hook_event_name: 'OpenCodeToolExecuteBefore',
+        tool_name: 'custom',
+        tool_input: { repository_path: '/tmp/other' },
+      }),
+      { hook_event_name: 'OpenCodeShellEnv', cwd: '/tmp/other' },
+    ]);
+  });
+
+  it('blocks an OpenCode tool when boundary validation fails', async () => {
+    const module = (await import(
+      `data:text/javascript;base64,${Buffer.from(OPENCODE_PLAN_PLUGIN).toString('base64')}`
+    )) as {
+      SameTreePlanPublisher: (input: Record<string, unknown>) => Promise<{
+        'tool.execute.before': (
+          input: Record<string, unknown>,
+          output: Record<string, unknown>,
+        ) => Promise<void>;
+      }>;
+    };
+    Reflect.set(globalThis, 'Bun', {
+      spawn: () => ({
+        stdin: { write: () => undefined, end: () => undefined },
+        stdout: new ReadableStream({ start: (stream) => stream.close() }),
+        stderr: new ReadableStream({
+          start: (stream) => {
+            stream.enqueue(
+              new TextEncoder().encode(
+                JSON.stringify({ error: { message: 'Blocked external worktree.' } }),
+              ),
+            );
+            stream.close();
+          },
+        }),
+        exited: Promise.resolve(1),
+        kill: () => undefined,
+      }),
+    });
+    const plugin = await module.SameTreePlanPublisher({
+      client: {},
+      directory: '/workspace',
+      worktree: '/workspace',
+    });
+
+    await expect(
+      plugin['tool.execute.before'](
+        { tool: 'bash', sessionID: 'session-root', callID: 'call-bash' },
+        { args: { command: 'git -C /tmp/other status' } },
+      ),
+    ).rejects.toThrow('Blocked external worktree.');
+  });
+
   it('captures only exactly prefixed OpenCode root user messages', async () => {
     const module = (await import(
       `data:text/javascript;base64,${Buffer.from(OPENCODE_PLAN_PLUGIN).toString('base64')}`
