@@ -38,7 +38,7 @@ Use npm from your normal shell under a supported Node.js runtime. SameTree recor
 
 ## Quick Start
 
-Run setup in every working tree that will launch a harness. Setup installs or updates integrations that inject peer messages, share explicitly prefixed user instructions, and automatically publish proposed Claude Code and OpenCode plans.
+Run setup in every working tree that will launch a harness. Setup installs or updates integrations that keep tool calls in that launch worktree, inject peer messages, share explicitly prefixed user instructions, and automatically publish proposed Claude Code and OpenCode plans.
 
 ```bash
 cd /path/to/your/project
@@ -106,6 +106,10 @@ opencode
 
 Each process gets its own identity and joins the coordination state for that working tree. SameTree starts with the harness, so there is no server to launch separately.
 
+The generated Claude Code and OpenCode guards reject external path arguments, effective working directories outside the launch worktree, explicit shell directory changes, Git context overrides, linked-worktree operations, and branch switching or integration commands. Launch a separate harness from another worktree when an agent needs to operate there. Joining both worktrees to one optional workspace shares coordination state; it does not let either process silently act as the other member.
+
+The shell guard is deliberately conservative. Run package-specific commands from the launch root with native workspace or prefix options instead of `cd`, and avoid dynamic shell expansion in agent-issued commands. Rerun setup and restart every harness after upgrading so generated and marketplace integrations load the current guard.
+
 Automatic OpenCode delivery requires a local TUI process. Attach mode reports the identity limitation instead of consuming messages for another process.
 
 ## Coordination Model
@@ -129,7 +133,7 @@ SAMETREE_AGENT=human sametree status
 
 SameTree stores operational state in SQLite under Git's private directories or the local workspace registry. By default, policy and role files under `.sametree/` remain versioned with the repository. Use `setup --local` when those files and harness integrations must remain private to one local clone.
 
-SameTree is for trusted processes on one machine. It does not merge simultaneous edits, synchronize files, sandbox agents, or support state databases on network and cloud-synced filesystems.
+SameTree is for trusted processes on one machine. Its harness guards block recognized worktree escapes cooperatively, but SameTree does not merge simultaneous edits, synchronize files, provide an operating-system sandbox, or support state databases on network and cloud-synced filesystems.
 
 ## Documentation
 

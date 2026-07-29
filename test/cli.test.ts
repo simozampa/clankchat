@@ -16,6 +16,7 @@ const claudePlanHookPath = path.resolve('plugins/sametree/hooks/publish-plan.mjs
 const claudeInstructionHookPath = path.resolve(
   'plugins/sametree/hooks/capture-shared-instruction.mjs',
 );
+const claudeWorktreeHookPath = path.resolve('plugins/sametree/hooks/guard-worktree.mjs');
 
 interface ProcessResult {
   code: number | null;
@@ -92,6 +93,34 @@ function runClaudeInstructionHook(
         SAMETREE_AGENT: '',
         SAMETREE_BIN: sametreeBin,
         SAMETREE_ROLE: 'implementer',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdin.end(JSON.stringify(input));
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code, stdout, stderr }));
+  });
+}
+
+function runClaudeWorktreeHook(
+  root: string,
+  sametreeBin: string,
+  input: Record<string, unknown>,
+): Promise<ProcessResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [claudeWorktreeHookPath], {
+      env: {
+        ...process.env,
+        CLAUDE_PROJECT_DIR: root,
+        SAMETREE_BIN: sametreeBin,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -530,6 +559,59 @@ describe('CLI', () => {
       createdBy: 'claude-code-session-claude',
       sourceHarness: 'claude-code',
       sourceSessionId: 'session-claude',
+    });
+  });
+
+  it('allows a safe Claude tool call through the fail-closed worktree hook', async () => {
+    const repository = createTestRepository();
+    repositories.push(repository);
+
+    expect(
+      await runClaudeWorktreeHook(repository.root, cliPath, {
+        hook_event_name: 'PreToolUse',
+        cwd: repository.root,
+        tool_name: 'Read',
+        tool_input: { file_path: 'src/example.ts' },
+      }),
+    ).toEqual({ code: 0, stderr: '', stdout: '' });
+  });
+
+  it('returns a structured Claude denial for an external worktree path', async () => {
+    const repository = createTestRepository();
+    repositories.push(repository);
+    const result = await runClaudeWorktreeHook(repository.root, cliPath, {
+      hook_event_name: 'PreToolUse',
+      cwd: repository.root,
+      tool_name: 'Read',
+      tool_input: { file_path: path.join(path.dirname(repository.root), 'outside.ts') },
+    });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    expect(JSON.parse(result.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason: expect.stringContaining('outside the launch worktree'),
+      },
+    });
+  });
+
+  it('denies Claude tool calls when SameTree validation is unavailable', async () => {
+    const repository = createTestRepository();
+    repositories.push(repository);
+    const result = await runClaudeWorktreeHook(repository.root, '/missing/sametree', {
+      hook_event_name: 'PreToolUse',
+      cwd: repository.root,
+      tool_name: 'Read',
+      tool_input: { file_path: 'src/example.ts' },
+    });
+
+    expect(result).toMatchObject({ code: 0, stderr: '' });
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+      },
     });
   });
 

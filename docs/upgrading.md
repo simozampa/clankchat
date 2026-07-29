@@ -2,6 +2,17 @@
 
 SameTree is pre-1.0 alpha software. Back up coordination state before upgrades and do not mix versions against the same database.
 
+## Upgrade To 0.1.6
+
+Version 0.1.6 adds fail-closed Claude Code and OpenCode worktree guards. Tool paths and effective working directories must remain in the worktree where each harness launched; recognized shell context changes, Git worktree operations, branch switching, and branch integration commands are rejected before execution. Optional workspaces still share coordination between members, but each member now requires its own harness process for filesystem operations.
+
+1. Stop every Claude Code, OpenCode, SameTree MCP, watcher, and message follower process using the coordination database.
+2. Install `npm install --global sametree@0.1.6 --force` from your normal Node.js shell.
+3. Rerun `sametree setup --claude --opencode`, adding `--local` for personal-only coordination and omitting unused harnesses.
+4. Restart every Claude Code and OpenCode process so they load the new generated OpenCode plugin and Claude marketplace hook.
+
+The shell guard rejects `cd`, `pushd`, `source`, `git -C`, Git worktree and branch-integration commands, external absolute or parent paths, and dynamic shell expansion. Prefer package-manager workspace or prefix options from the launch root. The guard is cooperative validation rather than an operating-system sandbox; review the remaining same-user and opaque-command limitations in [Security](../SECURITY.md).
+
 ## Upgrade To 0.1.5
 
 Version 0.1.5 preflights MCP session recovery before every tool call. The first read-only or lease-sensitive request after system sleep replaces an expired session before the harness can render `TASK_UNAVAILABLE`.

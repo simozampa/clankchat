@@ -1,5 +1,5 @@
 {
-  "description": "Share explicit user instructions and proposed Claude Code plans through SameTree.",
+  "description": "Keep Claude in its launch worktree and share explicit instructions and proposed plans.",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -15,6 +15,17 @@
       }
     ],
     "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard-worktree.mjs"],
+            "timeout": 5,
+            "statusMessage": "Checking SameTree worktree boundary"
+          }
+        ]
+      },
       {
         "matcher": "ExitPlanMode",
         "hooks": [
