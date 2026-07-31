@@ -4,7 +4,6 @@ import path from 'node:path';
 import { loadConfig } from './config.js';
 import { SameTreeError } from './errors.js';
 import { resolveRepository, stagedChangedLines, stagedFiles } from './git.js';
-import { claimsOverlap, normalizeClaim } from './paths.js';
 import type { PathClaim } from './types.js';
 
 const HOOK_MARKER = '# managed-by-sametree';
@@ -22,7 +21,7 @@ function isSymbolicLink(target: string): boolean {
 const PRE_COMMIT_HOOK = `#!/bin/sh
 ${HOOK_MARKER}
 command -v sametree >/dev/null 2>&1 || {
-  echo "SameTree: 'sametree' is not on PATH; refusing to skip coordination checks." >&2
+  echo "SameTree: 'sametree' is not on PATH; refusing to skip policy checks." >&2
   exit 1
 }
 exec sametree hook pre-commit
@@ -68,19 +67,21 @@ export function installHooks(cwd = process.cwd()): HookInstallationResult {
   return result;
 }
 
+export function checkPreCommit(cwd?: string): { changedLines: number; stagedFiles: string[] };
+/** @deprecated Claim arguments are ignored; pass only cwd. */
 export function checkPreCommit(
   claims: PathClaim[],
   agentName: string,
-  cwd = process.cwd(),
+  cwd?: string,
   worktreeId?: string,
+): { changedLines: number; stagedFiles: string[] };
+export function checkPreCommit(
+  cwdOrClaims: string | PathClaim[] = process.cwd(),
+  _agentName?: string,
+  legacyCwd?: string,
+  _worktreeId?: string,
 ): { changedLines: number; stagedFiles: string[] } {
-  if (!agentName) {
-    throw new SameTreeError(
-      'AGENT_REQUIRED',
-      'Set SAMETREE_AGENT to your registered agent name before committing.',
-    );
-  }
-
+  const cwd = typeof cwdOrClaims === 'string' ? cwdOrClaims : (legacyCwd ?? process.cwd());
   const repository = resolveRepository(cwd);
   const config = loadConfig(repository.root);
   const files = stagedFiles(repository.root);
@@ -92,27 +93,6 @@ export function checkPreCommit(
       `The staged diff has ${changedLines} changed lines; policy allows ${config.maxStagedLines}.`,
       { changedLines, maxStagedLines: config.maxStagedLines },
     );
-  }
-
-  for (const file of files) {
-    const staged = normalizeClaim(repository.root, file, 'exact', repository.ignoreCase);
-    const conflicting = claims.find(
-      (claim) =>
-        (worktreeId === undefined || claim.worktreeId === worktreeId) &&
-        claim.agentName !== agentName &&
-        (staged.path === claim.path ||
-          claimsOverlap(staged, {
-            comparisonPath: claim.comparisonPath,
-            kind: claim.kind,
-          })),
-    );
-    if (conflicting) {
-      throw new SameTreeError(
-        'HOOK_REFUSED',
-        `${file} overlaps ${conflicting.agentName}'s active ${conflicting.kind} claim on ${conflicting.path}.`,
-        { file, conflictingClaim: conflicting },
-      );
-    }
   }
 
   return { changedLines, stagedFiles: files };

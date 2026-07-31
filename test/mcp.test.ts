@@ -78,14 +78,15 @@ describe('MCP server', () => {
 
     expect(toolNames).toEqual(
       expect.arrayContaining([
-        'sametree_claim_acquire',
         'sametree_instruction_ack',
         'sametree_instruction_get',
         'sametree_instruction_list',
         'sametree_plan_publish',
         'sametree_task_force_takeover',
+        'sametree_task_start',
       ]),
     );
+    expect(toolNames.some((name) => name.includes('claim'))).toBe(false);
     for (const mutation of [
       'sametree_instruction_record',
       'sametree_instruction_revise',
@@ -131,25 +132,12 @@ describe('MCP server', () => {
     });
     const task = taskCreated.structuredContent as { result: { id: string } };
     await client.callTool({
-      name: 'sametree_task_claim',
+      name: 'sametree_task_start',
       arguments: { taskId: task.result.id },
     });
-    const acquired = await client.callTool({
-      name: 'sametree_claim_acquire',
-      arguments: {
-        paths: [{ path: 'src/suspended.ts' }, { path: 'src/already-expired.ts' }],
-      },
-    });
-    expect(acquired.isError).not.toBe(true);
     const database = new Database(resolveRepository(repository.root).databasePath);
     const nearExpiry = Date.now() + 1_000;
     database.prepare('UPDATE sessions SET expires_at = 0 WHERE id = ?').run(firstSession.result.id);
-    database
-      .prepare('UPDATE path_claims SET expires_at = 0 WHERE session_id = ? AND path = ?')
-      .run(firstSession.result.id, 'src/already-expired.ts');
-    database
-      .prepare('UPDATE path_claims SET expires_at = ? WHERE session_id = ? AND path = ?')
-      .run(nearExpiry, firstSession.result.id, 'src/suspended.ts');
     database
       .prepare('UPDATE tasks SET lease_expires_at = ? WHERE claimed_by_session = ?')
       .run(nearExpiry, firstSession.result.id);
@@ -169,13 +157,9 @@ describe('MCP server', () => {
     afterStatus.close();
     const recovered = await client.callTool({ name: 'sametree_heartbeat', arguments: {} });
     const recoveredSession = recovered.structuredContent as { result: { id: string } };
-    const claims = await client.callTool({ name: 'sametree_claim_list', arguments: {} });
     const verification = new Database(resolveRepository(repository.root).databasePath, {
       readonly: true,
     });
-    const recoveredClaim = verification
-      .prepare('SELECT session_id, expires_at FROM path_claims WHERE path = ?')
-      .get('src/suspended.ts') as { expires_at: number; session_id: string };
     const recoveredTask = verification
       .prepare('SELECT claimed_by_session, lease_expires_at FROM tasks WHERE id = ?')
       .get(task.result.id) as { claimed_by_session: string; lease_expires_at: number };
@@ -186,13 +170,8 @@ describe('MCP server', () => {
     expect(preflightSession.id).not.toBe(firstSession.result.id);
     expect(recoveredSession.result.id).toBe(preflightSession.id);
     expect(recoveredSession.result.id).not.toBe(firstSession.result.id);
-    expect(recoveredClaim.session_id).toBe(recoveredSession.result.id);
-    expect(recoveredClaim.expires_at).toBeGreaterThan(nearExpiry);
     expect(recoveredTask.claimed_by_session).toBe(recoveredSession.result.id);
     expect(recoveredTask.lease_expires_at).toBeGreaterThan(nearExpiry);
-    expect(claims.structuredContent).toMatchObject({
-      result: [expect.objectContaining({ path: 'src/suspended.ts' })],
-    });
   });
 
   it('recovers concurrent clients before post-sleep tool calls', async () => {
@@ -489,10 +468,8 @@ describe('MCP server', () => {
     const repository = createTestRepository();
     repositories.push(repository);
     const owner = Coordinator.open({ cwd: repository.root, agent: 'owner' });
-    const active = owner.claimTask(owner.createTask({ title: 'MCP takeover' }).id);
-    const [claim] = owner.acquireClaims([{ path: 'src/mcp-takeover.ts' }]);
+    const active = owner.startTask(owner.createTask({ title: 'MCP takeover' }).id);
     owner.close();
-    if (!claim) throw new Error('Expected an active claim.');
 
     const transport = new StdioClientTransport({
       command: process.execPath,
@@ -516,7 +493,6 @@ describe('MCP server', () => {
         expectedRevision: active.revision,
         reason: 'The user reassigned this task.',
         userAuthorized: true,
-        claimIds: [claim.id],
       },
     });
 
@@ -524,7 +500,7 @@ describe('MCP server', () => {
     expect(response.structuredContent).toMatchObject({
       result: {
         task: { assignee: 'replacement' },
-        claims: [{ id: claim.id, agentName: 'replacement' }],
+        claims: [],
       },
     });
   });

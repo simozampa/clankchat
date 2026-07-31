@@ -4,51 +4,35 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { Coordinator } from '../src/coordinator.js';
 import { resolveRepository, stagedChangedLines, stagedFiles } from '../src/git.js';
 import { checkCommitMessage, checkPreCommit, installHooks } from '../src/hooks.js';
 import { createTestRepository, type TestRepository } from './helpers.js';
 
 const repositories: TestRepository[] = [];
-const coordinators: Coordinator[] = [];
-
 function setup() {
   const repository = createTestRepository();
   repositories.push(repository);
-  const owner = Coordinator.open({ cwd: repository.root, agent: 'owner' });
-  const committer = Coordinator.open({ cwd: repository.root, agent: 'committer' });
-  coordinators.push(owner, committer);
-  return { repository, owner, committer };
+  return { repository };
 }
 
 afterEach(() => {
-  for (const coordinator of coordinators.splice(0)) coordinator.close();
   for (const repository of repositories.splice(0)) repository.cleanup();
 });
 
 describe('Git hooks', () => {
-  it('rejects staged files claimed by another agent', () => {
-    const { repository, owner, committer } = setup();
+  it('ignores legacy claim arguments while enforcing staged-diff policy', () => {
+    const { repository } = setup();
     writeFileSync(path.join(repository.root, 'shared.ts'), 'export {};\n');
     execFileSync('git', ['add', 'shared.ts'], { cwd: repository.root });
-    owner.acquireClaims([{ path: 'shared.ts' }]);
 
-    expect(
-      checkPreCommit(
-        committer.listClaims(),
-        committer.agentName,
-        repository.root,
-        'worktree_sibling',
-      ),
-    ).toEqual({ changedLines: 1, stagedFiles: ['shared.ts'] });
-    expect(() =>
-      checkPreCommit(
-        committer.listClaims(),
-        committer.agentName,
-        repository.root,
-        committer.worktreeId,
-      ),
-    ).toThrowError(expect.objectContaining({ code: 'HOOK_REFUSED' }));
+    expect(checkPreCommit(repository.root)).toEqual({
+      changedLines: 1,
+      stagedFiles: ['shared.ts'],
+    });
+    expect(checkPreCommit([], 'committer', repository.root, 'legacy-worktree')).toEqual({
+      changedLines: 1,
+      stagedFiles: ['shared.ts'],
+    });
   });
 
   it('enforces conventional subjects and forbids co-author trailers', () => {
@@ -83,7 +67,7 @@ describe('Git hooks', () => {
   });
 
   it('checks deleted paths and both sides of a rename', () => {
-    const { repository, owner, committer } = setup();
+    const { repository } = setup();
     const original = path.join(repository.root, 'original.ts');
     writeFileSync(original, 'export const value = 1;\n');
     execFileSync('git', ['add', 'original.ts'], { cwd: repository.root });
@@ -100,7 +84,6 @@ describe('Git hooks', () => {
       ],
       { cwd: repository.root, stdio: 'ignore' },
     );
-    owner.acquireClaims([{ path: 'original.ts' }]);
     renameSync(original, path.join(repository.root, 'renamed.ts'));
     execFileSync('git', ['add', '--all'], { cwd: repository.root });
 
@@ -108,13 +91,13 @@ describe('Git hooks', () => {
       expect.arrayContaining(['original.ts', 'renamed.ts']),
     );
     expect(Number.isFinite(stagedChangedLines(repository.root))).toBe(true);
-    expect(() =>
-      checkPreCommit(committer.listClaims(), committer.agentName, repository.root),
-    ).toThrowError(expect.objectContaining({ code: 'HOOK_REFUSED' }));
+    expect(checkPreCommit(repository.root).stagedFiles).toEqual(
+      expect.arrayContaining(['original.ts', 'renamed.ts']),
+    );
   });
 
   it('uses lexical symlink paths in pre-commit checks', () => {
-    const { repository, owner, committer } = setup();
+    const { repository } = setup();
     writeFileSync(path.join(repository.root, 'target-a'), 'a');
     writeFileSync(path.join(repository.root, 'target-b'), 'b');
     symlinkSync('target-a', path.join(repository.root, 'current'));
@@ -132,13 +115,10 @@ describe('Git hooks', () => {
       ],
       { cwd: repository.root, stdio: 'ignore' },
     );
-    owner.acquireClaims([{ path: 'current' }]);
     execFileSync('ln', ['-sfn', 'target-b', 'current'], { cwd: repository.root });
     execFileSync('git', ['add', 'current'], { cwd: repository.root });
 
-    expect(() =>
-      checkPreCommit(committer.listClaims(), committer.agentName, repository.root),
-    ).toThrowError(expect.objectContaining({ code: 'HOOK_REFUSED' }));
+    expect(checkPreCommit(repository.root).stagedFiles).toContain('current');
   });
 
   it('uses Git path and Boolean configuration parsing', () => {

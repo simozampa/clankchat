@@ -46,9 +46,9 @@ SAMETREE_AGENT=observer sametree watch --tail
 
 1. Give one implementer the worker prompt from [prompts.md](prompts.md).
 2. Give the reviewer the reviewer prompt and the same task ID.
-3. Agents record only the scopes you assigned to them, then claim disjoint paths. If scopes overlap, SameTree rejects the second claim before either agent commits.
-4. The implementer sends a task-linked message or offers non-authoritative handoff context when the change is ready.
-5. The reviewer reports findings through the task thread. It accepts a handoff only when you explicitly authorize it to edit the implementation.
-6. The final owner runs checks, makes an atomic commit, marks the task done, and releases every claim.
+3. Agents record and start only the scopes you assigned to them. If likely edits overlap, they coordinate ordering through messages or use separate worktrees.
+4. The implementer sends a task-linked review request containing the commit, summary, and verification results.
+5. The reviewer reports findings with the same task and thread IDs, so feedback reaches the implementer without user relay. It accepts a handoff only when you explicitly authorize it to edit the implementation.
+6. The implementer addresses findings in the existing thread, reruns checks, and marks the task done after the reviewer reports no remaining findings.
 
 Agent names need only be unique within this working tree. Prefix them with the repository name when several projects are open at once.

@@ -150,6 +150,7 @@ function eventDescription(event: CoordinationEvent): string {
       return `${event.actor}: updated task ${taskName(event)}`;
     }
     case 'task.claimed':
+    case 'task.started':
       return `${event.actor}: started task ${taskName(event)}`;
     case 'task.adopted':
       return `${event.actor}: adopted task ${taskName(event)}`;

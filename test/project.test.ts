@@ -9,6 +9,10 @@ import { initializeProject } from '../src/project.js';
 import {
   AWARENESS_INTEGRATION_TEMPLATE,
   AWARENESS_POLICY_TEMPLATE,
+  CLAIM_CONFIG_TEMPLATE,
+  CLAIM_IMPLEMENTER_ROLE_TEMPLATE,
+  CLAIM_INTEGRATION_TEMPLATE,
+  CLAIM_POLICY_TEMPLATE,
   INSTRUCTION_MCP_INTEGRATION_TEMPLATE,
   LEGACY_INTEGRATION_TEMPLATE,
   LEGACY_POLICY_TEMPLATE,
@@ -51,7 +55,7 @@ describe('generated state paths', () => {
     ).toContain('MCP is read/list/ack only');
   });
 
-  it('generates contention-based path claim guidance', () => {
+  it('generates task-linked review and overlap guidance', () => {
     const repository = createTestRepository({ initialize: false });
     repositories.push(repository);
 
@@ -62,11 +66,10 @@ describe('generated state paths', () => {
     );
     const policy = readFileSync(path.join(repository.root, '.sametree', 'policy.md'), 'utf8');
 
-    expect(coordination).toContain(
-      'acquire narrow member-qualified path claims when concurrent editing is plausible',
-    );
-    expect(coordination).toContain('broad tree claims can block unrelated work');
-    expect(policy).toContain('claim when uncertain');
+    expect(coordination).toContain('Send review requests as task-linked messages');
+    expect(coordination).toContain('SameTree does not reserve files');
+    expect(policy).toContain('coordinate ordering through task-linked messages');
+    expect(policy).not.toContain('Inspect active claims');
   });
 
   it('generates awareness-only work authority guidance', () => {
@@ -92,6 +95,8 @@ describe('generated state paths', () => {
     initializeProject(repository.root);
     const policyPath = path.join(repository.root, '.sametree', 'policy.md');
     const coordinationPath = path.join(repository.root, '.sametree', 'coordination.md');
+    const configPath = path.join(repository.root, '.sametree', 'config.json');
+    const implementerPath = path.join(repository.root, '.sametree', 'roles', 'implementer.md');
     const reviewerPath = path.join(repository.root, '.sametree', 'roles', 'reviewer.md');
     writeFileSync(policyPath, LEGACY_POLICY_TEMPLATE);
     writeFileSync(coordinationPath, LEGACY_INTEGRATION_TEMPLATE);
@@ -122,6 +127,21 @@ describe('generated state paths', () => {
     writeFileSync(coordinationPath, INSTRUCTION_MCP_INTEGRATION_TEMPLATE);
     expect(initializeProject(repository.root).updated).toEqual(['.sametree/coordination.md']);
     expect(readFileSync(coordinationPath, 'utf8')).toContain('MCP is read/list/ack only');
+
+    writeFileSync(configPath, CLAIM_CONFIG_TEMPLATE);
+    writeFileSync(policyPath, CLAIM_POLICY_TEMPLATE);
+    writeFileSync(coordinationPath, CLAIM_INTEGRATION_TEMPLATE);
+    writeFileSync(implementerPath, CLAIM_IMPLEMENTER_ROLE_TEMPLATE);
+    expect(initializeProject(repository.root).updated).toEqual([
+      '.sametree/config.json',
+      '.sametree/policy.md',
+      '.sametree/coordination.md',
+      '.sametree/roles/implementer.md',
+    ]);
+    expect(readFileSync(configPath, 'utf8')).not.toContain('claimTtlSeconds');
+    expect(readFileSync(policyPath, 'utf8')).toContain('task-linked message');
+    expect(readFileSync(coordinationPath, 'utf8')).toContain('does not reserve files');
+    expect(readFileSync(implementerPath, 'utf8')).toContain('task-linked review request');
 
     writeFileSync(policyPath, '# Custom policy\n\nOnly the user assigns work.\n');
     expect(initializeProject(repository.root).preserved).toContain('.sametree/policy.md');

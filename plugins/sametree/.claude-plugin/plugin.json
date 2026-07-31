@@ -1,8 +1,8 @@
 {
   "name": "sametree",
   "displayName": "SameTree",
-  "version": "0.1.6",
-  "description": "Worktree-safe SameTree coordination, shared user instructions, plans, and peer delivery",
+  "version": "0.1.7",
+  "description": "Worktree-safe task coordination, shared user instructions, plans, and review delivery",
   "author": {
     "name": "SameTree maintainers"
   },

@@ -763,7 +763,7 @@ function migrate(
       .prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations')
       .get() as { version: number };
 
-    if (current.version > 6) {
+    if (current.version > 7) {
       throw new SameTreeError(
         'DATABASE_ERROR',
         `This database uses unsupported schema version ${current.version}.`,
@@ -817,6 +817,11 @@ function migrate(
         .run(now);
     } else {
       database.exec(SHARED_INSTRUCTION_SCHEMA);
+    }
+    if (current.version < 7) {
+      database
+        .prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)')
+        .run(now);
     }
     database.exec('COMMIT');
   } catch (error) {

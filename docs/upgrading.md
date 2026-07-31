@@ -2,6 +2,20 @@
 
 SameTree is pre-1.0 alpha software. Back up coordination state before upgrades and do not mix versions against the same database.
 
+## Upgrade To 0.1.7
+
+Version 0.1.7 removes active path claims and centers coordination on user-assigned task execution plus task-linked review messages. The claim CLI and MCP tools are gone, task start replaces task claim, takeover and handoff no longer transfer claims, and Git pre-commit checks no longer inspect path ownership. Existing `path_claims` rows and historical claim events remain archived in SQLite, while status and compatibility library methods expose no active claims.
+
+1. Stop every Claude Code, OpenCode, SameTree MCP, watcher, and message follower process using the coordination database.
+2. Back up every `state.sqlite3` with its `-wal` and `-shm` sidecars as one coherent set.
+3. Install `npm install --global sametree@0.1.7 --force` from your normal Node.js shell.
+4. Rerun `sametree setup --claude --opencode`, adding `--local` for personal-only coordination and omitting unused harnesses.
+5. Restart every Claude Code and OpenCode process so generated guidance and tools use `task start` and task-linked review threads.
+
+Inspect setup's `preserved` and `existing` results before restarting. SameTree refreshes exact stock files but never overwrites customized policy, role, coordination, `AGENTS.md`, or `CLAUDE.md` content. Manually replace any custom guidance that still tells agents to inspect, acquire, transfer, or release path claims.
+
+Opening a database with 0.1.7 records schema version 7 so older binaries reject it instead of silently renewing archived claims. There is no in-place downgrade; restore the coherent pre-upgrade backup before reinstalling an older release. SameTree no longer reserves files, so serialize likely overlapping edits through messages or use separate worktrees.
+
 ## Upgrade To 0.1.6
 
 Version 0.1.6 adds fail-closed Claude Code and OpenCode worktree guards. Tool paths and effective working directories must remain in the worktree where each harness launched; recognized shell context changes, Git worktree operations, branch switching, and branch integration commands are rejected before execution. Optional workspaces still share coordination between members, but each member now requires its own harness process for filesystem operations.

@@ -1,25 +1,26 @@
 # SameTree
 
-**Coordinate multiple Claude Code and OpenCode agents in the same repository and branch, no worktrees required.**
+**Deliver task-linked reviews between Claude Code and OpenCode agents, no user relay required.**
 
 [![CI](https://github.com/simozampa/sametree/actions/workflows/ci.yml/badge.svg)](https://github.com/simozampa/sametree/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js 22+](https://img.shields.io/badge/node-%3E%3D22.12-339933.svg)](package.json)
 
-SameTree gives coding agents shared tasks, explicit user instructions, proposed plans, path claims, messages, handoffs, and policy. It runs locally through MCP, with no daemon, cloud service, or external database service.
+SameTree gives coding agents shared tasks, explicit user instructions, proposed plans, task-linked review messages, handoffs, and policy. It runs locally through MCP, with no daemon, cloud service, or external database service.
 
 <p align="center">
-  <img src="docs/demo.svg" alt="SameTree setup, task and path ownership, conflict prevention, and agent messaging" width="100%">
+  <img src="docs/demo.svg" alt="SameTree setup, task creation, review request, and same-thread findings" width="100%">
 </p>
 
 ## Why SameTree
 
 - Keep user-assigned work and agent activity visible in one place.
 - Share an explicit user instruction with active and future agents without copying ordinary prompts.
-- Surface conflicting path claims before cooperative agents edit the same files.
+- Deliver review requests and findings directly in one task-linked thread.
 - Share proposed plans automatically before implementation starts.
 - Deliver peer messages directly to active Claude Code and OpenCode sessions.
 - Coordinate several repositories or linked worktrees when one checkout is not enough.
+- Keep overlapping writers deliberate through messages or separate worktrees.
 - Keep operational state local and outside tracked files.
 
 ## Install
@@ -117,11 +118,12 @@ Automatic OpenCode delivery requires a local TUI process. Attach mode reports th
 - Tasks record work already assigned by the user; they are not a peer-managed queue.
 - Shared instructions are direct user context for existing work; they are distinct from repository policy and never create tasks.
 - Plans are revisioned shared context; publishing one does not assign review or implementation work.
-- Claims identify files an agent intends to edit and reject hard conflicts in the same working tree.
+- Review requests and findings use ordinary messages with the same task and thread IDs.
 - Messages and handoffs carry context but never change an agent's scope without user authorization.
-- Linked-worktree overlaps produce integration warnings rather than pretending branches cannot diverge.
+- SameTree does not reserve files; serialize likely overlap through messages or separate worktrees.
+- Branch changes remain visible across linked-worktree workspace members.
 
-Claims are cooperative records, not filesystem locks. SameTree can reject conflicting claims, but it cannot prevent a process from editing files directly.
+Task assignments and execution leases coordinate responsibility, not filesystem access. SameTree preserves concurrent changes and routes context, but it does not merge simultaneous edits.
 
 Agents normally use MCP tools directly. Humans and scripts can use the same state through the CLI:
 
@@ -149,7 +151,7 @@ SameTree is for trusted processes on one machine. Its harness guards block recog
 
 ### Can multiple Claude Code and OpenCode agents safely work in the same repository?
 
-SameTree reduces collisions when multiple agents share one repository and branch by giving them common tasks, path claims, and messages. Claims remain cooperative, so agents must use the integration rather than bypassing active claims.
+SameTree keeps user-assigned tasks visible and delivers review feedback directly between agents. It does not reserve files, so likely overlapping edits should be serialized through messages or isolated in separate worktrees.
 
 ### Do parallel coding agents need separate branches or Git worktrees?
 
@@ -157,7 +159,7 @@ No. Agents can coordinate in the same live checkout when their work is intertwin
 
 ### How do coding agents share context across sessions?
 
-SameTree stores tasks, shared user instructions, proposed plans, messages, handoffs, claims, and policy acknowledgements in local SQLite. Its Claude Code and OpenCode adapters capture only exactly prefixed instructions, publish plans, and deliver structured updates to active sessions.
+SameTree stores tasks, shared user instructions, proposed plans, messages, handoffs, and policy acknowledgements in local SQLite. Its Claude Code and OpenCode adapters capture only exactly prefixed instructions, publish plans, and deliver structured updates to active sessions.
 
 ### Is SameTree a Conductor alternative?
 
@@ -165,7 +167,7 @@ SameTree stores tasks, shared user instructions, proposed plans, messages, hando
 
 ### How is SameTree different from agent-talk?
 
-[agent-talk](https://github.com/xhluca/agent-talk) provides encrypted agent messaging across people and machines through a relay. SameTree stays on one machine and adds shared tasks, path claims, handoffs, policy, and Git checks.
+[agent-talk](https://github.com/xhluca/agent-talk) provides encrypted agent messaging across people and machines through a relay. SameTree stays on one machine and adds shared tasks, task-linked review threads, handoffs, policy, and Git checks.
 
 ### Does SameTree work across multiple machines?
 

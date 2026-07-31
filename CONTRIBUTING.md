@@ -37,9 +37,9 @@ npm pack --dry-run
 
 ## Testing Concurrency
 
-Coordination bugs often disappear in single-process tests. Changes to tasks, claims, sessions, or handoffs should include competing-process coverage when feasible. A concurrency test should verify both the winner and the absence of partial writes by the loser.
+Coordination bugs often disappear in single-process tests. Changes to tasks, messages, sessions, or handoffs should include competing-process coverage when feasible. A concurrency test should verify both the winner and the absence of partial writes by the loser.
 
-After crash or contention tests, run SQLite `integrity_check` and verify application invariants such as no overlapping active claims between different agents.
+After crash or contention tests, run SQLite `integrity_check` and verify application invariants such as one current task revision and one durable delivery record per agent and message.
 
 ## Regenerating the Demo
 

@@ -98,7 +98,7 @@ process.stdin.once('data', () => setTimeout(() => {
     const database = openDatabase(context, { now: 100 });
 
     expect(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual(
-      { version: 6 },
+      { version: 7 },
     );
     expect(database.prepare('SELECT name, implicit FROM workspace_metadata').get()).toEqual({
       name: path.basename(repository.root),
@@ -260,9 +260,12 @@ process.stdin.once('data', () => setTimeout(() => {
         payload_json TEXT NOT NULL,
         created_at INTEGER NOT NULL
       ) STRICT;
-      INSERT INTO events
-        (id, kind, actor, entity_type, entity_id, payload_json, created_at)
-      VALUES ('event_legacy', 'task.created', 'legacy-agent', 'task', 'task_legacy', '{}', 1);
+       INSERT INTO events
+         (id, kind, actor, entity_type, entity_id, payload_json, created_at)
+       VALUES (
+         'event_legacy', 'claim.acquired', 'legacy-agent', 'claim', 'claim_legacy',
+         '{"paths":["src"]}', 1
+       );
     `);
     legacy.close();
 
@@ -284,10 +287,16 @@ process.stdin.once('data', () => setTimeout(() => {
       task_id: 'task_legacy',
       worktree_id: worktree.id,
     });
-    expect(migrated.prepare('SELECT id, worktree_id FROM events').get()).toEqual({
+    expect(migrated.prepare('SELECT id, kind, worktree_id FROM events').get()).toEqual({
       id: 'event_legacy',
+      kind: 'claim.acquired',
       worktree_id: worktree.id,
     });
+    expect(migrated.prepare('SELECT MAX(version) AS version FROM schema_migrations').get()).toEqual(
+      {
+        version: 7,
+      },
+    );
     expect(migrated.pragma('integrity_check')).toEqual([{ integrity_check: 'ok' }]);
     expect(migrated.pragma('foreign_key_check')).toEqual([]);
     expect(migrated.prepare('SELECT COUNT(*) AS count FROM plans').get()).toEqual({ count: 0 });
