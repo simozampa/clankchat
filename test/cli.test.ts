@@ -318,9 +318,10 @@ describe('CLI', () => {
       agent: 'server-agent',
       workspaceRegistryRoot: registry,
     });
-    expect(coordinator.acquireClaims([{ member: 'frontend', path: 'src/shared.ts' }])).toHaveLength(
-      1,
-    );
+    expect(coordinator.snapshot().members.map((member) => member.name)).toEqual([
+      'backend',
+      'frontend',
+    ]);
     coordinator.close();
   });
 
@@ -818,18 +819,20 @@ describe('CLI', () => {
     expect(Date.now() - startedAt).toBeLessThan(4_000);
   });
 
-  it('grants exactly one of two competing process claims', async () => {
+  it('does not expose the removed claim command', async () => {
     const repository = createTestRepository();
     repositories.push(repository);
 
-    const results = await Promise.all([
-      runCli(repository.root, 'agent-a', ['claim', 'acquire', 'shared.ts']),
-      runCli(repository.root, 'agent-b', ['claim', 'acquire', 'shared.ts']),
-    ]);
+    const result = await runCli(repository.root, 'agent-a', ['claim', 'acquire', 'shared.ts']);
 
-    expect(results.filter((result) => result.code === 0)).toHaveLength(1);
-    const failure = results.find((result) => result.code !== 0);
-    expect(failure?.stderr).toContain('CLAIM_CONFLICT');
+    expect(result.code).not.toBe(0);
+    expect(JSON.parse(result.stderr)).toMatchObject({
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: expect.stringContaining("unknown command 'claim'"),
+      },
+      ok: false,
+    });
   });
 
   it('opens a fresh database concurrently without leaking lock errors', async () => {
@@ -839,9 +842,10 @@ describe('CLI', () => {
     const results = await Promise.all(
       Array.from({ length: 6 }, (_, index) =>
         runCli(repository.root, `starter-${index}`, [
-          'claim',
-          'acquire',
-          `src/startup-${index}.ts`,
+          'task',
+          'create',
+          '--title',
+          `Startup task ${index}`,
         ]),
       ),
     );
@@ -854,39 +858,34 @@ describe('CLI', () => {
     database.close();
   });
 
-  it('returns a compact claim acquisition receipt', async () => {
+  it('starts assigned work through the canonical task command', async () => {
     const repository = createTestRepository();
     repositories.push(repository);
 
-    const member = path.basename(repository.root);
-    const result = await runCli(repository.root, 'claimant', [
-      'claim',
-      'acquire',
-      '--at',
-      `${member}:src/api.ts`,
+    const created = await runCli(repository.root, 'implementer', [
+      'task',
+      'create',
+      '--title',
+      'Implement API',
     ]);
-    const output = JSON.parse(result.stdout) as Array<Record<string, unknown>>;
+    const task = JSON.parse(created.stdout) as { id: string };
+    const result = await runCli(repository.root, 'implementer', ['task', 'start', task.id]);
+    const output = JSON.parse(result.stdout) as { assignee: string; id: string; status: string };
 
     expect(result).toMatchObject({ code: 0, stderr: '' });
-    expect(Object.keys(output[0] ?? {}).sort()).toEqual([
-      'expiresAt',
-      'id',
-      'kind',
-      'member',
-      'path',
-      'warnings',
-    ]);
-    expect(output[0]?.member).toBe(member);
+    expect(output).toMatchObject({
+      assignee: 'implementer',
+      id: task.id,
+      status: 'in_progress',
+    });
   });
 
   it('forcibly takes over active work with explicit user authorization', async () => {
     const repository = createTestRepository();
     repositories.push(repository);
     const owner = Coordinator.open({ cwd: repository.root, agent: 'owner' });
-    const active = owner.claimTask(owner.createTask({ title: 'CLI takeover' }).id);
-    const [claim] = owner.acquireClaims([{ path: 'src/cli-takeover.ts' }]);
+    const active = owner.startTask(owner.createTask({ title: 'CLI takeover' }).id);
     owner.close();
-    if (!claim) throw new Error('Expected an active claim.');
 
     const result = await runCli(repository.root, 'replacement', [
       'task',
@@ -897,8 +896,6 @@ describe('CLI', () => {
       '--reason',
       'The user reassigned this task.',
       '--user-authorized',
-      '--claim',
-      claim.id,
     ]);
     const output = JSON.parse(result.stdout) as {
       claims: Array<{ agentName: string; id: string }>;
@@ -907,16 +904,14 @@ describe('CLI', () => {
 
     expect(result).toMatchObject({ code: 0, stderr: '' });
     expect(output.task.assignee).toBe('replacement');
-    expect(output.claims).toEqual([
-      expect.objectContaining({ id: claim.id, agentName: 'replacement' }),
-    ]);
+    expect(output.claims).toEqual([]);
   });
 
   it('grants exactly one of two competing forced takeovers', async () => {
     const repository = createTestRepository();
     repositories.push(repository);
     const owner = Coordinator.open({ cwd: repository.root, agent: 'owner' });
-    const active = owner.claimTask(owner.createTask({ title: 'Contended CLI takeover' }).id);
+    const active = owner.startTask(owner.createTask({ title: 'Contended CLI takeover' }).id);
     owner.close();
     const args = [
       'task',

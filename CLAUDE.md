@@ -4,4 +4,4 @@
 
 Read `.sametree/policy.md` and the role matching your task under `.sametree/roles/` before making changes.
 
-Run `npm run check` before declaring work complete. Do not edit active claims owned by another agent, overwrite existing user changes, or add co-author trailers.
+Run `npm run check` before declaring work complete. Do not overwrite existing user changes or add co-author trailers. Send review requests and findings through task-linked SameTree message threads.

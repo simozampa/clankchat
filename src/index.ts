@@ -12,6 +12,7 @@ export {
   type ReviseSharedInstructionInput,
   type RevokeSharedInstructionInput,
   type SnapshotOptions,
+  type StartTaskInput,
   type UpdateTaskInput,
   type UserAuthorizedHandoffInput,
   type UserAuthorizedTaskInput,

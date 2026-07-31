@@ -24,7 +24,7 @@ Exactly one state mode is required. Fresh mode starts the member without copying
 
 If creation fails before a member is recorded, retrying the exact create command preserves its generated identity. `workspace cancel-create` safely removes that empty pending registration so corrected name, member, or mode input can be used. A join intent preserves workspace, member, and mode across a crash after member insertion. Once a member exists, complete the exact retry and use `workspace leave` instead.
 
-`leave` and `prune` mark members unavailable while preserving their tasks, claims, sessions, and events. Leave requires no live home-member session. Prune retires only members whose recorded Git identity is definitely stale. Relink restores a retired member only when its original private and common Git directories still match, as after `git worktree move`; it cannot attach a replacement clone.
+`leave` and `prune` mark members unavailable while preserving their tasks, messages, sessions, and events. Archived claim rows created before 0.1.7 are also retained. Leave requires no live home-member session. Prune retires only members whose recorded Git identity is definitely stale. Relink restores a retired member only when its original private and common Git directories still match, as after `git worktree move`; it cannot attach a replacement clone.
 
 Create and add initialize missing `.sametree/` project files in the current member but do not configure harness integrations; run `sametree setup` separately where Claude Code or OpenCode will run. Other lifecycle commands do not create agent sessions. Workspace names cannot start with `.` or contain path separators. Add and relink accept an exact ID or unique workspace name; duplicate names require the ID, and path-like arguments are rejected because `--cwd` selects the joining worktree. SameTree does not create repositories, branches, or worktrees. A custom registry selected with `SAMETREE_WORKSPACE_REGISTRY` must be inherited by every CLI, MCP, adapter, and hook process.
 
@@ -35,8 +35,7 @@ An agent name is unique within one workspace and contains letters, numbers, `.`,
 A session represents one Coordinator-backed process lifetime and has one home member. It records the home member's starting branch and HEAD descriptor. Coordination CLI commands, MCP servers, watchers, message followers, and plan publishers create sessions; setup, workspace lifecycle, and diagnostics do not. Built-in sessions remain in the session table for lease ownership and diagnostics but omit lifecycle audit events. Library callers emit `session.started` and `session.closed` by default and may disable them. An MCP heartbeat renews:
 
 - The session expiry.
-- Active path claims owned by that session across available members.
-- The execution lease of in-progress tasks claimed by that session.
+- The execution lease of in-progress tasks started by that session.
 
 Agent identity is cooperative, not authenticated. Do not use SameTree across hostile trust boundaries.
 
@@ -57,13 +56,13 @@ The service permits explicit updates between these states by the current assigne
 
 Tasks are awareness records for work already assigned by the user, not a peer-managed work queue. Task invariants:
 
-- A task cannot be claimed until every dependency is `done`.
+- A task cannot be started until every dependency is `done`.
 - New tasks are assigned to the agent that creates them. An agent cannot create a task assigned to a peer.
-- A ready task with an assignee can be claimed only by that assignee.
-- Normal claiming never changes an existing assignment, even after its execution lease expires.
+- A ready task with an assignee can be started only by that assignee.
+- Normal starting never changes an existing assignment, even after its execution lease expires.
 - Adopting a legacy unassigned task requires the exact current revision, an audit reason, and explicit user authorization.
-- `done`, `cancelled`, and `blocked` tasks cannot be claimed.
-- Task updates require ownership established by a prior claim or initial assignment.
+- `done`, `cancelled`, and `blocked` tasks cannot be started.
+- Task updates require assignment to the current agent.
 - Every transition into `in_progress` rechecks dependencies.
 - Every mutation increments `revision`.
 - Callers may submit `expectedRevision` to reject stale updates.
@@ -74,7 +73,7 @@ Assignments are durable agent ownership. Execution leases identify the active se
 
 Task create/update accepts replacement member lists; an empty MCP list or CLI `--clear-members` clears them. CLI `--member` may repeat, and `task list --member` filters tasks explicitly tagged with that member. Untagged tasks are workspace-global records and do not match a member filter.
 
-Status is a current-state view by default: it includes workspace metadata, all members, active sessions, agents with a live session, every nonterminal task, active shared-instruction summaries and acknowledgement state, claims, and warnings. Agent rows list their active members. Callers can explicitly include inactive agents, terminal tasks, and revoked instructions. Task listing defaults to 25 nonterminal rows, accepts a maximum of 100, and uses the last returned task ID as the `after` cursor. A status filter selects that state even when it is terminal. Invalid limits are rejected rather than silently clamped.
+Status is a current-state view by default: it includes workspace metadata, all members, active sessions, agents with a live session, every nonterminal task, active shared-instruction summaries and acknowledgement state, unread message and handoff counts, and warnings. The deprecated `claims` field remains present as an empty array for library compatibility. Agent rows list their active members. Callers can explicitly include inactive agents, terminal tasks, and revoked instructions. Task listing defaults to 25 nonterminal rows, accepts a maximum of 100, and uses the last returned task ID as the `after` cursor. A status filter selects that state even when it is terminal. Invalid limits are rejected rather than silently clamped.
 
 Every status response also observes the caller's live worktree root, branch or detached state, full commit ID, and dirty state. An unborn branch has a `null` commit; detached HEAD has a `null` branch. Dirty state includes staged, unstaged, conflicted, submodule, and untracked changes, but not ignored files. Other member rows expose identity, root, repository, and availability; their HEAD metadata is refreshed internally for session and branch warnings.
 
@@ -82,7 +81,7 @@ Status refreshes every available member's HEAD. A session whose home member move
 
 ### Forced Takeover
 
-Normal task claiming never changes another agent's assignment. When the user explicitly reassigns work, `sametree_task_force_takeover` or `sametree task force-takeover` transfers it regardless of whether its execution lease is live or expired.
+Normal task starting never changes another agent's assignment. When the user explicitly reassigns work, `sametree_task_force_takeover` or `sametree task force-takeover` transfers it regardless of whether its execution lease is live or expired.
 
 A forced takeover requires:
 
@@ -90,41 +89,26 @@ A forced takeover requires:
 - The exact current task revision.
 - A non-empty audit reason.
 - An explicit `userAuthorized: true` assertion or `--user-authorized` flag.
-- Optional IDs for at most 100 active claims owned by the previous assignee.
 
-The task and selected claims transfer in one immediate transaction. Each selected claim must still belong to the previous assignee and cannot overlap a claim left with that assignee. Any stale revision or invalid claim rolls back the entire operation. Success increments the task revision and records `task.force_taken_over` with the previous assignee, previous lease expiry, reason, and transferred claim IDs. Ready work with finished dependencies starts a new execution lease; blocked or dependency-blocked work keeps its current state without a lease so the new owner can resolve it explicitly.
+The task transfers in one immediate transaction. A stale revision or invalid task state rolls back the operation. Success increments the task revision and records `task.force_taken_over` with the previous assignee, previous lease expiry, and reason. Ready work with finished dependencies starts a new execution lease; blocked or dependency-blocked work keeps its current state without a lease so the new owner can resolve it explicitly. The library accepts legacy `claimIds` input but ignores it and returns `claims: []`.
 
 Expired work remains assigned and uses the same user-authorized takeover path. The authorization field is an auditable cooperative assertion, not authentication; SameTree remains unsuitable across hostile trust boundaries.
 
-## Path Claims
+## Review Threads And Overlap
 
-A claim targets one member/worktree and has one of two kinds:
+SameTree uses task-linked messages for review coordination. An implementer sends a review request with:
 
-- `exact`: one repository-relative path, such as `src/api.ts`.
-- `tree`: a path and every descendant, such as `src/auth`.
+- The reviewer as recipient.
+- The implementation task ID.
+- A subject and body containing the commit, summary, and verification results.
 
-Recursive claims must name the real directory path; a final symbolic link is rejected to avoid giving the link entry and its target different ownership identities.
+The first message ID becomes its default thread ID. The reviewer sends findings with the same task ID and thread ID. Follow-up fixes and the final no-findings response continue in that thread, preserving the full review loop without asking the user to copy context between agents.
 
-Two claims overlap when:
+Review messages remain non-authoritative peer context. They do not assign review work, expand implementation scope, or transfer task ownership. The user must assign each agent's scope directly. Harness followers deliver addressed review messages to active Claude Code and OpenCode sessions; inbox state remains durable when an agent is offline.
 
-- Both are exact and their normalized paths are equal.
-- A tree path is equal to or an ancestor of the other path.
-- The repository root tree `.` contains every path.
+SameTree does not reserve files, reject overlapping edits, or infer path ownership. Agents must preserve concurrent changes they did not create. When likely edits overlap, serialize writers through messages or use separate worktrees. The worktree guard prevents recognized operations from escaping the harness's launch worktree, but it is not a filesystem lock or operating-system sandbox.
 
-Agents may hold overlapping claims with themselves. Any overlap with another agent in the same member rejects acquisition. A request containing paths for several members commits all claims or none.
-
-CLI positional paths target the current member unless `--member` selects another. `--at <member>:<path>` may repeat to create a cross-member batch:
-
-```bash
-sametree claim acquire src/local.ts --member frontend \
-  --at backend:src/remote.ts
-```
-
-The MCP equivalent adds an optional `member` to each requested path. Compact CLI/MCP acquisition receipts return claim ID, member, path, kind, expiry, and warnings; full claim listings and library results also expose worktree identity. Matching paths in linked worktree members of one repository are allowed but return `LINKED_WORKTREE_OVERLAP`, including overlaps held by the same agent, because later branch integration may conflict. Matching paths in unrelated repositories do not warn. Git hooks enforce only claims targeting the current physical member.
-
-Agents should inspect active claims before editing and acquire a narrow claim when concurrent editing is plausible, ownership is ambiguous, or a collision would be costly. When uncertain, claim. Prefer exact files or the smallest practical tree because broad tree claims can block unrelated work.
-
-Claims expire unless renewed and should be released immediately when work ends. They are advisory and do not modify filesystem permissions.
+Databases upgraded from releases before 0.1.7 retain `path_claims` and historical claim events as archival data. Current CLI and MCP claim tools do not exist. Deprecated library acquisition throws `INVALID_INPUT`; listing returns `[]`; release returns `{ released: 0 }`; and lease recovery reports `claims: 0`.
 
 ## Proposed Plans
 
@@ -201,12 +185,11 @@ An offer captures:
 - Source and destination agents.
 - Human-readable summary.
 - Structured JSON context.
-- Optional path-claim IDs to transfer.
 - Expiry.
 
-Structured context, including the selected claim IDs, is limited to 100,000 serialized UTF-8 bytes.
+Structured context is limited to 100,000 serialized UTF-8 bytes. The library accepts legacy `claimIds` input but ignores it.
 
-An offer is non-authoritative until the user explicitly directs the recipient to accept it. Authorized acceptance is one transaction. It verifies that the offer is active and that the task revision still matches, then transfers assignment, starts a destination execution lease, and transfers every still-valid selected claim. A selected claim cannot overlap a source claim left behind because that would create conflicting ownership after transfer. If the task or claims changed after the offer, acceptance fails with `HANDOFF_CONFLICT` and the agents must create a fresh offer.
+An offer is non-authoritative until the user explicitly directs the recipient to accept it. Authorized acceptance is one transaction. It verifies that the offer is active and that the task revision still matches, then transfers assignment and starts a destination execution lease. If the task changed after the offer, acceptance fails with `HANDOFF_CONFLICT` and the agents must create a fresh offer.
 
 Rejection records a terminal handoff state without changing task ownership.
 
@@ -222,7 +205,7 @@ Prompt policy is backed by optional Git hooks for rules that can be checked mech
 
 ## Events
 
-Every meaningful coordination mutation appends an event in the same transaction as current state. Explicit workspaces use one global sequence, and applicable events include member/worktree origin. Imported events receive new sequences while source sequence metadata is retained internally. Built-in process lifecycle churn is retained in session rows rather than copied into the event stream. Shared instructions append `instruction.recorded`, `instruction.revised`, `instruction.revoked`, or `instruction.acknowledged`; plan revisions append `plan.published` or `plan.revised` alongside notification events. Consumers call `sametree_events` with the last seen sequence and persist the returned maximum as their next cursor. Direct reads default to 25 events and accept an explicit limit up to 1,000; streaming watchers request larger pages internally.
+Every meaningful coordination mutation appends an event in the same transaction as current state. Explicit workspaces use one global sequence, and applicable events include member/worktree origin. Imported events receive new sequences while source sequence metadata is retained internally. Built-in process lifecycle churn is retained in session rows rather than copied into the event stream. Shared instructions append `instruction.recorded`, `instruction.revised`, `instruction.revoked`, or `instruction.acknowledged`; plan revisions append `plan.published` or `plan.revised` alongside notification events; task execution appends `task.started`. Historical claim events remain readable and retain their existing formatter. Consumers call `sametree_events` with the last seen sequence and persist the returned maximum as their next cursor. Direct reads default to 25 events and accept an explicit limit up to 1,000; streaming watchers request larger pages internally.
 
 Event polling is intended for context refresh and debugging. Current-state tools remain authoritative for decisions.
 
@@ -233,7 +216,7 @@ Expected failures return stable machine-readable codes:
 | Code | Meaning |
 | --- | --- |
 | `AGENT_REQUIRED` | No agent identity was provided |
-| `CLAIM_CONFLICT` | Another agent owns an overlapping active claim |
+| `CLAIM_CONFLICT` | Retained in the public error type for historical compatibility; current claim APIs do not emit it |
 | `DATABASE_ERROR` | The database schema, identity, or migration is invalid |
 | `HANDOFF_CONFLICT` | A handoff expired, resolved, or references stale work |
 | `GIT_STATUS_ERROR` | Git could not report live branch or worktree state |

@@ -12,7 +12,7 @@ import { checkCommitMessage, checkPreCommit, installHooks } from './hooks.js';
 import { initializeProject } from './project.js';
 import { runWithInstallRuntime } from './runtime.js';
 import { setupProject } from './setup.js';
-import type { Harness, PathClaim, TaskPriority, TaskStatus } from './types.js';
+import type { Harness, TaskPriority, TaskStatus } from './types.js';
 import { VERSION } from './version.js';
 import { followMessages, watchEvents } from './watch.js';
 import { resolveRegisteredWorkspace, validateWorkspaceName } from './workspace.js';
@@ -50,14 +50,6 @@ function collectOptional(value: string, previous?: string[]): string[] {
   return [...(previous ?? []), value];
 }
 
-function qualifiedClaim(value: string): { member: string; path: string } {
-  const separator = value.indexOf(':');
-  if (separator < 1 || separator === value.length - 1) {
-    throw new SameTreeError('INVALID_INPUT', "Use --at with '<member>:<path>'.");
-  }
-  return { member: value.slice(0, separator), path: value.slice(separator + 1) };
-}
-
 function integer(value: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed)) throw new Error(`Expected an integer, received '${value}'.`);
@@ -80,17 +72,6 @@ function workspaceJoinMode(options: {
     throw new SameTreeError('INVALID_INPUT', 'Choose exactly one of --fresh or --import-current.');
   }
   return options.importCurrent ? 'import-current' : 'fresh';
-}
-
-function claimReceipts(claims: PathClaim[]) {
-  return claims.map(({ id, member, path, kind, expiresAt, warnings }) => ({
-    id,
-    member,
-    path,
-    kind,
-    expiresAt,
-    warnings,
-  }));
 }
 
 function openCoordinator(
@@ -244,7 +225,7 @@ program
 
 program
   .command('status')
-  .description('Show live Git state, active agents, current work, claims, and unread state.')
+  .description('Show live Git state, active agents, current work, and unread state.')
   .option('--all-agents', 'include inactive registered agents')
   .option('--all-tasks', 'include done and cancelled tasks')
   .option('--include-revoked-instructions', 'include revoked shared user instructions')
@@ -491,7 +472,7 @@ task
   );
 
 task
-  .command('claim <task-id>')
+  .command('start <task-id>')
   .description('Start or renew assigned work; never take over a peer task implicitly.')
   .option('--revision <number>', 'expected revision for a legacy unassigned task', integer)
   .option('--reason <text>', 'audit reason for adopting a legacy unassigned task')
@@ -503,7 +484,7 @@ task
       command: Command,
     ) => {
       runWithCoordinator(command, (coordinator) =>
-        coordinator.claimTask(taskId, {
+        coordinator.startTask(taskId, {
           ...(options.revision !== undefined ? { expectedRevision: options.revision } : {}),
           ...(options.reason !== undefined ? { reason: options.reason } : {}),
           ...(options.userAuthorized !== undefined
@@ -520,16 +501,14 @@ task
   .requiredOption('--revision <number>', 'expected current task revision', integer)
   .requiredOption('--reason <text>', 'audit reason for bypassing the active lease')
   .requiredOption('--user-authorized', 'confirm that the user explicitly authorized this takeover')
-  .option('--claim <claim-id>', 'active claim to transfer from the current owner', collect, [])
   .action(
     (
       taskId: string,
-      options: { claim: string[]; reason: string; revision: number; userAuthorized: true },
+      options: { reason: string; revision: number; userAuthorized: true },
       command: Command,
     ) => {
       runWithCoordinator(command, (coordinator) =>
         coordinator.forceTakeoverTask(taskId, {
-          claimIds: options.claim,
           expectedRevision: options.revision,
           reason: options.reason,
           userAuthorized: options.userAuthorized,
@@ -798,59 +777,6 @@ instruction
     );
   });
 
-const claim = program.command('claim').description('Coordinate cooperative path leases.');
-
-claim
-  .command('acquire [paths...]')
-  .option('--tree', 'claim every path recursively')
-  .option('--member <name>', 'target workspace member')
-  .option('--at <member:path>', 'claim a member-qualified path', collect, [])
-  .option('--ttl <seconds>', 'lease duration', integer)
-  .action(
-    (
-      paths: string[],
-      options: { at: string[]; member?: string; tree?: boolean; ttl?: number },
-      command: Command,
-    ) => {
-      runWithCoordinator(command, (coordinator) =>
-        claimReceipts(
-          coordinator.acquireClaims(
-            [
-              ...paths.map((claimedPath) => ({
-                path: claimedPath,
-                ...(options.tree ? { kind: 'tree' as const } : {}),
-                ...(options.member !== undefined ? { member: options.member } : {}),
-              })),
-              ...options.at.map((value) => ({
-                ...qualifiedClaim(value),
-                ...(options.tree ? { kind: 'tree' as const } : {}),
-              })),
-            ],
-            options.ttl,
-          ),
-        ),
-      );
-    },
-  );
-
-claim
-  .command('list')
-  .option('--all', 'include expired claims')
-  .action((options: { all?: boolean }, command: Command) => {
-    runWithCoordinator(command, (coordinator) =>
-      coordinator.listClaims({ includeExpired: options.all ?? false }),
-    );
-  });
-
-claim
-  .command('release [claim-ids...]')
-  .option('--all', 'release every claim owned by this agent')
-  .action((claimIds: string[], options: { all?: boolean }, command: Command) => {
-    runWithCoordinator(command, (coordinator) =>
-      coordinator.releaseClaims({ ids: claimIds, all: options.all ?? false }),
-    );
-  });
-
 const message = program.command('message').description('Exchange durable agent messages.');
 
 message
@@ -940,7 +866,6 @@ handoff
   .requiredOption('--to <agent>')
   .requiredOption('--summary <text>')
   .option('--context <json>', 'structured context object', objectJson, {})
-  .option('--claim <claim-id>', 'claim to transfer on acceptance', collect, [])
   .action(
     (
       taskId: string,
@@ -948,7 +873,6 @@ handoff
         to: string;
         summary: string;
         context: Record<string, unknown>;
-        claim: string[];
       },
       command: Command,
     ) => {
@@ -958,7 +882,6 @@ handoff
           to: options.to,
           summary: options.summary,
           context: options.context,
-          claimIds: options.claim,
         }),
       );
     },
@@ -1069,14 +992,8 @@ hook.command('worktree-guard').action((_options: unknown, command: Command) => {
   assertWorktreeBoundary(globals.cwd, objectJson(readFileSync(0, 'utf8')));
 });
 hook.command('pre-commit').action((_options: unknown, command: Command) => {
-  runWithCoordinator(command, (coordinator) =>
-    checkPreCommit(
-      coordinator.listClaims(),
-      coordinator.agentName,
-      coordinator.repository.root,
-      coordinator.worktreeId,
-    ),
-  );
+  const globals = command.optsWithGlobals<GlobalOptions>();
+  print(checkPreCommit(globals.cwd));
 });
 hook
   .command('commit-msg <message-path>')

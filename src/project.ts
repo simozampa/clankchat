@@ -8,6 +8,10 @@ import { assertSafeWritePath } from './paths.js';
 import {
   AWARENESS_INTEGRATION_TEMPLATE,
   AWARENESS_POLICY_TEMPLATE,
+  CLAIM_CONFIG_TEMPLATE,
+  CLAIM_IMPLEMENTER_ROLE_TEMPLATE,
+  CLAIM_INTEGRATION_TEMPLATE,
+  CLAIM_POLICY_TEMPLATE,
   configTemplate,
   IMPLEMENTER_ROLE_TEMPLATE,
   INSTRUCTION_MCP_INTEGRATION_TEMPLATE,
@@ -32,17 +36,22 @@ export const PROJECT_FILE_TEMPLATES: ReadonlyArray<{
   content: string;
   legacyContent?: string | readonly string[];
 }> = [
-  { relativePath: CONFIG_FILE, content: configTemplate(DEFAULT_CONFIG) },
+  {
+    relativePath: CONFIG_FILE,
+    content: configTemplate(DEFAULT_CONFIG),
+    legacyContent: CLAIM_CONFIG_TEMPLATE,
+  },
   {
     relativePath: POLICY_FILE,
     content: POLICY_TEMPLATE,
-    legacyContent: [LEGACY_POLICY_TEMPLATE, AWARENESS_POLICY_TEMPLATE],
+    legacyContent: [CLAIM_POLICY_TEMPLATE, LEGACY_POLICY_TEMPLATE, AWARENESS_POLICY_TEMPLATE],
   },
   {
     relativePath: path.join(CONFIG_DIRECTORY, 'coordination.md'),
     content: INTEGRATION_TEMPLATE,
     legacyContent: [
       LEGACY_INTEGRATION_TEMPLATE,
+      CLAIM_INTEGRATION_TEMPLATE,
       AWARENESS_INTEGRATION_TEMPLATE,
       PLAN_INTEGRATION_TEMPLATE,
       INSTRUCTION_MCP_INTEGRATION_TEMPLATE,
@@ -51,6 +60,7 @@ export const PROJECT_FILE_TEMPLATES: ReadonlyArray<{
   {
     relativePath: path.join(CONFIG_DIRECTORY, 'roles', 'implementer.md'),
     content: IMPLEMENTER_ROLE_TEMPLATE,
+    legacyContent: CLAIM_IMPLEMENTER_ROLE_TEMPLATE,
   },
   {
     relativePath: path.join(CONFIG_DIRECTORY, 'roles', 'reviewer.md'),

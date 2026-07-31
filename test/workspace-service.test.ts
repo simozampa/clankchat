@@ -508,7 +508,7 @@ describe('workspace operations', () => {
       expect.objectContaining({ id: plan.id, author: 'frontend-agent' }),
     );
     expect(serverAgent.inbox().map((message) => message.threadId)).toContain(`plan:${plan.id}`);
-    frontendAgent.claimTask(task.id);
+    frontendAgent.startTask(task.id);
     const handoff = frontendAgent.offerHandoff({
       taskId: task.id,
       to: 'server-agent',
@@ -540,7 +540,7 @@ describe('workspace operations', () => {
     ).toEqual(['backend', 'frontend']);
   });
 
-  it('qualifies claims by member and renews cross-member batches', () => {
+  it('exposes no active claims across workspace members', () => {
     const frontend = repository();
     const server = repository();
     const registry = registryRoot();
@@ -549,74 +549,31 @@ describe('workspace operations', () => {
       { name: 'Product', memberName: 'frontend', mode: 'fresh' },
       { registryRoot: registry },
     );
-    const serverMember = addWorkspaceMember(
+    addWorkspaceMember(
       server.root,
       { workspaceId: workspace.workspace.id, memberName: 'backend', mode: 'fresh' },
       { registryRoot: registry },
     );
-    let now = 1_000;
     const frontendAgent = Coordinator.open({
       cwd: frontend.root,
       agent: 'frontend-agent',
-      clock: () => now,
       workspaceRegistryRoot: registry,
     });
     const serverAgent = Coordinator.open({
       cwd: server.root,
       agent: 'server-agent',
-      clock: () => now,
       workspaceRegistryRoot: registry,
     });
     coordinators.push(frontendAgent, serverAgent);
-    execFileSync('git', ['config', 'core.ignorecase', 'true'], { cwd: server.root });
 
-    const metadata = new Database(workspace.workspace.databasePath);
-    metadata
-      .prepare('UPDATE repositories SET ignore_case = 0 WHERE id = ?')
-      .run(serverMember.member.repositoryId);
-    metadata.close();
-
-    const frontendPath = frontendAgent.acquireClaims([
-      { member: 'frontend', path: 'src/shared.ts' },
-    ])[0];
-    const serverPath = serverAgent.acquireClaims([{ member: 'backend', path: 'src/shared.ts' }])[0];
-    expect(frontendPath?.worktreeId).not.toBe(serverPath?.worktreeId);
-    serverAgent.acquireClaims([{ member: 'backend', path: 'src/Case.ts' }]);
-    expect(() => frontendAgent.acquireClaims([{ member: 'backend', path: 'src/case.ts' }])).toThrow(
-      /overlaps/u,
-    );
-
-    const crossMember = frontendAgent.acquireClaims(
-      [
-        { member: 'frontend', path: 'src/frontend.ts' },
-        { member: 'backend', path: 'src/server.ts' },
-      ],
-      30,
-    );
-    expect(crossMember.map((claim) => claim.member)).toEqual(['frontend', 'backend']);
     expect(() =>
-      serverAgent.acquireClaims([
-        { member: 'backend', path: 'src/server.ts' },
-        { member: 'frontend', path: 'src/atomic-free.ts' },
-      ]),
-    ).toThrow(/backend:src\/server.ts overlaps/u);
-    expect(
-      frontendAgent
-        .listClaims()
-        .some((claim) => claim.path === 'src/atomic-free.ts' && claim.agentName === 'server-agent'),
-    ).toBe(false);
-
-    now = 2_000;
-    frontendAgent.heartbeat();
-    expect(
-      frontendAgent
-        .listClaims()
-        .filter((claim) => claim.agentName === 'frontend-agent')
-        .map((claim) => claim.expiresAt),
-    ).toEqual([902_000, 902_000, 902_000]);
+      frontendAgent.acquireClaims([{ member: 'backend', path: 'src/shared.ts' }]),
+    ).toThrow(/Path claims were removed/u);
+    expect(frontendAgent.listClaims()).toEqual([]);
+    expect(serverAgent.snapshot().claims).toEqual([]);
   });
 
-  it('warns instead of blocking matching claims in linked worktrees', () => {
+  it('reports branch changes across linked worktrees without claim warnings', () => {
     const main = repository();
     const registry = registryRoot();
     git(main.root, ['add', '.']);
@@ -662,30 +619,9 @@ describe('workspace operations', () => {
         expect.objectContaining({ code: 'BRANCH_CHANGED', member: 'feature' }),
       );
 
-      mainAgent.acquireClaims([{ member: 'main', path: 'src/shared.ts' }]);
-      const linkedClaim = linkedAgent.acquireClaims([
-        { member: 'feature', path: 'src/shared.ts' },
-      ])[0];
-      expect(linkedClaim?.warnings).toContainEqual(
-        expect.objectContaining({
-          code: 'LINKED_WORKTREE_OVERLAP',
-          member: 'feature',
-          conflictingMember: 'main',
-        }),
-      );
-      expect(linkedAgent.snapshot().warnings).toContainEqual(
-        expect.objectContaining({ code: 'LINKED_WORKTREE_OVERLAP' }),
-      );
-      const batch = mainAgent.acquireClaims([
-        { member: 'main', path: 'src/batch.ts' },
-        { member: 'feature', path: 'src/batch.ts' },
+      expect(linkedAgent.snapshot().warnings).toEqual([
+        expect.objectContaining({ code: 'BRANCH_CHANGED', member: 'feature' }),
       ]);
-      expect(batch).toHaveLength(2);
-      for (const claim of batch) {
-        expect(claim.warnings).toContainEqual(
-          expect.objectContaining({ code: 'LINKED_WORKTREE_OVERLAP' }),
-        );
-      }
     } finally {
       linkedAgent?.close();
       mainAgent?.close();
@@ -1025,7 +961,7 @@ describe('workspace operations', () => {
     );
   });
 
-  it('prunes missing members while preserving their task and claim history', () => {
+  it('prunes missing members while preserving task and archived claim history', () => {
     const frontend = repository();
     const server = repository();
     const registry = registryRoot();
@@ -1040,13 +976,28 @@ describe('workspace operations', () => {
       { registryRoot: registry },
     );
     const serverAgent = open(server.root, 'server-agent', registry);
-    const task = serverAgent.claimTask(
+    const task = serverAgent.startTask(
       serverAgent.createTask({
         title: 'Preserve after prune',
         members: ['backend'],
       }).id,
     );
-    const claim = serverAgent.acquireClaims([{ member: 'backend', path: 'src/preserved.ts' }])[0];
+    const archive = new Database(workspace.workspace.databasePath);
+    archive
+      .prepare(
+        `INSERT INTO path_claims
+          (id, path, comparison_path, kind, agent_name, session_id,
+           expires_at, created_at, worktree_id)
+         VALUES ('claim_archived', 'src/preserved.ts', 'src/preserved.ts', 'exact', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        serverAgent.agentName,
+        serverAgent.sessionId,
+        Date.now() + 60_000,
+        Date.now(),
+        serverAgent.worktreeId,
+      );
+    archive.close();
     serverAgent.close();
     server.cleanup();
 
@@ -1057,20 +1008,19 @@ describe('workspace operations', () => {
     expect(observer.listTasks({ member: 'backend' })).toContainEqual(
       expect.objectContaining({ id: task.id }),
     );
-    expect(observer.listClaims({ includeExpired: true })).toContainEqual(
-      expect.objectContaining({ id: claim?.id, member: 'backend' }),
-    );
-    expect(() => observer.acquireClaims([{ member: 'backend', path: 'src/new.ts' }])).toThrow(
-      /is unavailable/u,
-    );
-    expect(() =>
-      observer.forceTakeoverTask(task.id, {
-        claimIds: claim ? [claim.id] : [],
-        expectedRevision: task.revision,
-        reason: 'The user explicitly requested a takeover test.',
-        userAuthorized: true,
-      }),
-    ).toThrow(/no longer transferable/u);
+    expect(observer.listClaims({ includeExpired: true })).toEqual([]);
+    const verification = new Database(workspace.workspace.databasePath, { readonly: true });
+    expect(
+      verification
+        .prepare(
+          `SELECT claim.id, worktree.name AS member
+           FROM path_claims claim
+           JOIN worktrees worktree ON worktree.id = claim.worktree_id
+           WHERE claim.id = 'claim_archived'`,
+        )
+        .get(),
+    ).toEqual({ id: 'claim_archived', member: 'backend' });
+    verification.close();
     expect(diagnoseWorkspace(frontend.root, { registryRoot: registry })).toMatchObject({
       ok: false,
       foreignKeyViolations: 0,
@@ -1095,7 +1045,7 @@ describe('workspace operations', () => {
     const frontendAgent = open(frontend.root, 'frontend-agent', registry);
     const serverAgent = open(server.root, 'server-agent', registry);
     const task = serverAgent.createTask({ title: 'Leave history', members: ['backend'] });
-    const handoffTask = frontendAgent.claimTask(
+    const handoffTask = frontendAgent.startTask(
       frontendAgent.createTask({ title: 'Reject retired recipient' }).id,
     );
     const handoff = frontendAgent.offerHandoff({
@@ -1103,7 +1053,6 @@ describe('workspace operations', () => {
       to: 'server-agent',
       summary: 'Verify that a retired recipient cannot accept this work.',
     });
-    serverAgent.acquireClaims([{ member: 'frontend', path: 'src/shared.ts' }]);
     expect(() => leaveWorkspace(server.root, { registryRoot: registry })).toThrow(
       /Stop active sessions/u,
     );
@@ -1114,9 +1063,7 @@ describe('workspace operations', () => {
       name: 'backend',
       available: false,
     });
-    expect(() =>
-      serverAgent.acquireClaims([{ member: 'frontend', path: 'src/shared.ts' }]),
-    ).toThrow(/session expired/u);
+    expect(() => serverAgent.heartbeat()).toThrow(/session expired/u);
     expect(() => serverAgent.updateTask(task.id, { status: 'in_progress' })).toThrow(
       /session expired/u,
     );

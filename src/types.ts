@@ -1,6 +1,7 @@
 export type Harness = 'claude-code' | 'opencode' | 'other';
 export type TaskStatus = 'ready' | 'in_progress' | 'blocked' | 'done' | 'cancelled';
 export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
+/** @deprecated Path claims are no longer active. */
 export type ClaimKind = 'exact' | 'tree';
 export type HandoffStatus = 'offered' | 'accepted' | 'rejected' | 'cancelled' | 'expired';
 export type SharedInstructionAction = 'recorded' | 'revised' | 'revoked';
@@ -46,6 +47,7 @@ export interface Task {
   members: string[];
 }
 
+/** @deprecated Path claims are no longer active. */
 export interface PathClaim {
   id: string;
   worktreeId: string;
@@ -60,6 +62,7 @@ export interface PathClaim {
 }
 
 export interface CoordinationWarning {
+  /** LINKED_WORKTREE_OVERLAP is retained only for historical type compatibility. */
   code: 'BRANCH_CHANGED' | 'LINKED_WORKTREE_OVERLAP';
   message: string;
   member: string;
@@ -246,6 +249,7 @@ export interface CoordinationSnapshot {
   tasks: Task[];
   plans: PlanSummary[];
   instructions: SharedInstructionSummary[];
+  /** @deprecated Always empty. Path claims are no longer active. */
   claims: PathClaim[];
   unreadMessages: number;
   unacknowledgedInstructions: number;

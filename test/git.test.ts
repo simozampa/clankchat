@@ -216,8 +216,7 @@ describe('Git worktree context', () => {
       clock: () => now,
     });
     coordinators.push(coordinator);
-    const task = coordinator.claimTask(coordinator.createTask({ title: 'Stay active' }).id);
-    const claim = coordinator.acquireClaims([{ path: 'src/active.ts' }])[0];
+    const task = coordinator.startTask(coordinator.createTask({ title: 'Stay active' }).id);
 
     git(repository.root, ['checkout', '-b', 'feature']);
     now = 2_000;
@@ -234,7 +233,7 @@ describe('Git worktree context', () => {
     expect(coordinator.listTasks().find((item) => item.id === task.id)?.leaseExpiresAt).toBe(
       902_000,
     );
-    expect(coordinator.listClaims().find((item) => item.id === claim?.id)?.expiresAt).toBe(902_000);
+    expect(coordinator.snapshot().claims).toEqual([]);
     expect(
       coordinator
         .events({ limit: 100 })

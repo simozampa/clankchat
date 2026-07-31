@@ -20,7 +20,7 @@ This guard is cooperative preflight validation, not process isolation. It cannot
 
 Processes running as the same operating-system user can:
 
-- Write source files without acquiring a claim.
+- Write source files regardless of SameTree task or message state.
 - Read or modify the local SameTree database.
 - Impersonate another agent name.
 - Bypass Git hooks with `--no-verify`.

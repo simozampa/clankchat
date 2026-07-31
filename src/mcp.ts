@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { Coordinator } from './coordinator.js';
 import { errorResult, isSameTreeError } from './errors.js';
 import { runWithInstallRuntime } from './runtime.js';
-import type { Harness, PathClaim, TaskPriority, TaskStatus } from './types.js';
+import type { Harness, TaskPriority, TaskStatus } from './types.js';
 import { VERSION } from './version.js';
 
 const installRuntimeExitCode = await runWithInstallRuntime();
@@ -74,7 +74,7 @@ function recoverExpiredSession(): void {
   try {
     replacement.recoverLeasesFromExpiredSession(expired.sessionId);
   } catch (error) {
-    replacement.close({ releaseClaims: true });
+    replacement.close({ releaseTaskLeases: true });
     throw error;
   }
   coordinator = replacement;
@@ -95,17 +95,6 @@ function withSessionRecovery<T>(operation: () => T): T {
   }
 }
 
-function claimReceipts(claims: PathClaim[]) {
-  return claims.map(({ id, member, path, kind, expiresAt, warnings }) => ({
-    id,
-    member,
-    path,
-    kind,
-    expiresAt,
-    warnings,
-  }));
-}
-
 function execute(operation: () => unknown) {
   try {
     // Read-only coordinator methods do not assert session liveness. Preflight every tool call so
@@ -123,7 +112,7 @@ server.registerTool(
   {
     title: 'SameTree status',
     description:
-      'Read live Git worktree state, active agents, nonterminal tasks, shared user instructions, claims, unread messages, handoffs, and the event cursor. Historical rows are opt-in.',
+      'Read live Git worktree state, active agents, nonterminal tasks, shared user instructions, unread messages, handoffs, and the event cursor. Historical rows are opt-in.',
     inputSchema: {
       includeInactiveAgents: z.boolean().optional(),
       includeRevokedInstructions: z.boolean().optional(),
@@ -145,8 +134,8 @@ server.registerTool(
 server.registerTool(
   'sametree_heartbeat',
   {
-    title: 'Renew SameTree leases',
-    description: 'Renew this session and every task or path lease held by it.',
+    title: 'Renew SameTree session',
+    description: 'Renew this session and every active task lease held by it.',
     outputSchema,
     annotations: { idempotentHint: true },
   },
@@ -211,7 +200,7 @@ server.registerTool(
 );
 
 server.registerTool(
-  'sametree_task_claim',
+  'sametree_task_start',
   {
     title: 'Start or renew assigned work',
     description:
@@ -226,7 +215,7 @@ server.registerTool(
   },
   ({ taskId, expectedRevision, reason, userAuthorized }) =>
     execute(() =>
-      coordinator.claimTask(taskId, {
+      coordinator.startTask(taskId, {
         ...(expectedRevision !== undefined ? { expectedRevision } : {}),
         ...(reason !== undefined ? { reason } : {}),
         ...(userAuthorized !== undefined ? { userAuthorized } : {}),
@@ -239,24 +228,22 @@ server.registerTool(
   {
     title: 'Reassign work with user authorization',
     description:
-      'Reassign another agent’s task and selected claims only after the user explicitly authorizes the scope change.',
+      'Reassign another agent’s task only after the user explicitly authorizes the scope change.',
     inputSchema: {
       taskId: z.string(),
       expectedRevision: z.number().int().positive(),
       reason: z.string().min(1).max(2_000),
       userAuthorized: z.literal(true),
-      claimIds: z.array(z.string()).max(100).optional(),
     },
     outputSchema,
     annotations: { destructiveHint: true },
   },
-  ({ taskId, expectedRevision, reason, userAuthorized, claimIds }) =>
+  ({ taskId, expectedRevision, reason, userAuthorized }) =>
     execute(() =>
       coordinator.forceTakeoverTask(taskId, {
         expectedRevision,
         reason,
         userAuthorized,
-        ...(claimIds !== undefined ? { claimIds } : {}),
       }),
     ),
 );
@@ -414,72 +401,6 @@ server.registerTool(
 );
 
 server.registerTool(
-  'sametree_claim_acquire',
-  {
-    title: 'Claim paths',
-    description: 'Atomically acquire exact-file or recursive-directory cooperative leases.',
-    inputSchema: {
-      paths: z
-        .array(
-          z.object({
-            path: z.string(),
-            kind: z.enum(['exact', 'tree']).optional(),
-            member: z.string().min(1).optional(),
-          }),
-        )
-        .min(1)
-        .max(100),
-      ttlSeconds: z.number().int().min(30).max(86_400).optional(),
-    },
-    outputSchema,
-  },
-  ({ paths, ttlSeconds }) =>
-    execute(() =>
-      claimReceipts(
-        coordinator.acquireClaims(
-          paths.map(({ path, kind, member }) => ({
-            path,
-            ...(kind !== undefined ? { kind } : {}),
-            ...(member !== undefined ? { member } : {}),
-          })),
-          ttlSeconds,
-        ),
-      ),
-    ),
-);
-
-server.registerTool(
-  'sametree_claim_list',
-  {
-    title: 'List path claims',
-    description: 'List active cooperative file and directory leases.',
-    outputSchema,
-    annotations: { readOnlyHint: true, idempotentHint: true },
-  },
-  () => execute(() => coordinator.listClaims()),
-);
-
-server.registerTool(
-  'sametree_claim_release',
-  {
-    title: 'Release path claims',
-    description: 'Release selected claims or every claim owned by this agent.',
-    inputSchema: {
-      ids: z.array(z.string()).optional(),
-      all: z.boolean().optional(),
-    },
-    outputSchema,
-  },
-  ({ ids, all }) =>
-    execute(() =>
-      coordinator.releaseClaims({
-        ...(ids !== undefined ? { ids } : {}),
-        ...(all !== undefined ? { all } : {}),
-      }),
-    ),
-);
-
-server.registerTool(
   'sametree_message_send',
   {
     title: 'Send a message',
@@ -543,24 +464,22 @@ server.registerTool(
   {
     title: 'Offer a handoff',
     description:
-      'Offer non-authoritative context and selected claims to another agent. The offer does not change their scope.',
+      'Offer non-authoritative context to another agent. The offer does not change their scope.',
     inputSchema: {
       taskId: z.string(),
       to: z.string(),
       summary: z.string().min(1).max(20_000),
       context: z.record(z.string(), z.unknown()).optional(),
-      claimIds: z.array(z.string()).max(100).optional(),
     },
     outputSchema,
   },
-  ({ taskId, to, summary, context, claimIds }) =>
+  ({ taskId, to, summary, context }) =>
     execute(() =>
       coordinator.offerHandoff({
         taskId,
         to,
         summary,
         ...(context !== undefined ? { context } : {}),
-        ...(claimIds !== undefined ? { claimIds } : {}),
       }),
     ),
 );

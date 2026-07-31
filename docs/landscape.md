@@ -19,7 +19,7 @@ A mailbox plus advisory file reservations already exists elsewhere. SameTree foc
 
 - Already-running Claude Code and OpenCode instances launched independently by one developer.
 - One existing dirty working tree rather than one worktree per worker.
-- One embedded transactional store for tasks, atomic claims, leases, messages, handoffs, policy acknowledgements, and audit events.
+- One embedded transactional store for tasks, execution leases, task-linked review messages, handoffs, policy acknowledgements, and audit events.
 - No local HTTP daemon, PostgreSQL, Dolt, Redis, Docker, GitHub account, or Bun runtime.
 - Versioned cross-harness policy plus optional commit-time mechanical checks.
 - An unambiguous OSI-approved MIT license.
@@ -31,16 +31,16 @@ If swarm-tools' task decomposition and plugin model fit your workflow, use it. I
 Several ideas recur across successful systems and are retained here:
 
 - Tasks and communication are different primitives.
-- Claims need expiries because agent processes crash.
+- Task execution leases need expiries because agent processes crash.
 - Handoffs must persist context beyond chat history.
-- Current ownership must be visible before edits begin.
+- User-assigned task ownership must remain durable and visible.
 - Durable inboxes need a harness-native wake-up path; MCP polling alone cannot notify an idle agent.
-- Claims cannot make concurrent same-file editing safe; work must be serialized.
+- Concurrent same-file editing must be serialized or isolated; advisory reservations cannot make it safe.
 - Prompt instructions drift, so checkable rules benefit from Git hooks.
 
 ## Material Differences
 
-SameTree uses SQLite rather than append-only files because claim batches, dependency checks, and handoff acceptance need cross-process transactions. It keeps the database in Git's private worktree directory rather than a tracked project directory because active WAL files should not be synchronized through Git.
+SameTree uses SQLite rather than append-only files because dependency checks, task leases, message delivery, and handoff acceptance need cross-process transactions. It keeps the database in Git's private worktree directory rather than a tracked project directory because active WAL files should not be synchronized through Git.
 
 SameTree intentionally does not spawn agents, choose tasks, create worktrees, merge branches, or call models. It coordinates processes that the developer already controls.
 

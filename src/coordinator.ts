@@ -14,7 +14,6 @@ import {
   readGitWorktreeContext,
   resolveRepository,
 } from './git.js';
-import { claimsOverlap, normalizeClaim } from './paths.js';
 import type {
   Agent,
   ClaimKind,
@@ -101,17 +100,21 @@ export interface UpdateTaskInput {
 }
 
 export interface ForceTakeoverTaskInput {
+  /** @deprecated Path claims are no longer active and these IDs are ignored. */
   claimIds?: string[];
   expectedRevision: number;
   reason: string;
   userAuthorized: boolean;
 }
 
-export interface UserAuthorizedTaskInput {
+export interface StartTaskInput {
   expectedRevision?: number;
   reason?: string;
   userAuthorized?: boolean;
 }
+
+/** @deprecated Use StartTaskInput. */
+export type UserAuthorizedTaskInput = StartTaskInput;
 
 export interface UserAuthorizedHandoffInput {
   reason?: string;
@@ -132,6 +135,7 @@ export interface SnapshotOptions {
   includeTerminalTasks?: boolean;
 }
 
+/** @deprecated Path claims are no longer active. */
 export interface AcquireClaimInput {
   path: string;
   kind?: ClaimKind;
@@ -315,21 +319,6 @@ function mapTask(row: Row, dependencies: string[], members: string[]): Task {
     updatedAt: numberValue(row, 'updated_at'),
     dependencies,
     members,
-  };
-}
-
-function mapClaim(row: Row, warnings: CoordinationWarning[] = []): PathClaim {
-  return {
-    id: stringValue(row, 'id'),
-    worktreeId: stringValue(row, 'worktree_id'),
-    member: stringValue(row, 'worktree_name'),
-    path: stringValue(row, 'path'),
-    comparisonPath: stringValue(row, 'comparison_path'),
-    kind: stringValue(row, 'kind') as ClaimKind,
-    agentName: stringValue(row, 'agent_name'),
-    expiresAt: numberValue(row, 'expires_at'),
-    createdAt: numberValue(row, 'created_at'),
-    warnings,
   };
 }
 
@@ -657,11 +646,9 @@ export class Coordinator {
     if (!found) throw new SameTreeError('NOT_FOUND', `Agent '${name}' is not registered.`);
   }
 
-  #claimWorktree(member?: string): {
+  #memberWorktree(member?: string): {
     id: string;
-    ignoreCase: boolean;
     name: string;
-    repositoryId: string;
     root: string;
   } {
     const requestedMember = member === undefined ? undefined : requireText(member, 'Member', 100);
@@ -706,40 +693,8 @@ export class Coordinator {
     return {
       id,
       name: stringValue(row, 'name'),
-      repositoryId: stringValue(row, 'repository_id'),
       root,
-      ignoreCase: targetRepository.ignoreCase,
     };
-  }
-
-  #linkedClaimWarnings(
-    claim: {
-      comparisonPath: string;
-      kind: ClaimKind;
-      member: string;
-      repositoryId: string;
-      worktreeId: string;
-    },
-    active: Row[],
-  ): CoordinationWarning[] {
-    return active
-      .filter(
-        (row) =>
-          stringValue(row, 'repository_id') === claim.repositoryId &&
-          stringValue(row, 'worktree_id') !== claim.worktreeId &&
-          claimsOverlap(claim, {
-            comparisonPath: stringValue(row, 'comparison_path'),
-            kind: stringValue(row, 'kind') as ClaimKind,
-          }),
-      )
-      .map((row) => ({
-        code: 'LINKED_WORKTREE_OVERLAP' as const,
-        message: `${claim.member}:${claim.comparisonPath} may conflict when integrated with ${stringValue(row, 'worktree_name')}:${stringValue(row, 'path')}.`,
-        member: claim.member,
-        worktreeId: claim.worktreeId,
-        conflictingClaimId: stringValue(row, 'id'),
-        conflictingMember: stringValue(row, 'worktree_name'),
-      }));
   }
 
   #dependencies(taskId: string): string[] {
@@ -997,83 +952,6 @@ export class Coordinator {
     }
   }
 
-  #transferClaims(
-    claimIds: string[],
-    fromAgent: string,
-    now: number,
-    conflictCode: 'HANDOFF_CONFLICT' | 'TASK_UNAVAILABLE' = 'HANDOFF_CONFLICT',
-  ): PathClaim[] {
-    this.#assertActiveSession(now);
-    const selectedIds = [...new Set(claimIds)];
-    if (selectedIds.length > 100) {
-      throw new SameTreeError('INVALID_INPUT', 'Transfer at most 100 claims at once.');
-    }
-    const selectedClaims = selectedIds.map((claimId) => {
-      const claim = this.#database
-        .prepare(
-          `SELECT claim.*, worktree.name AS worktree_name
-           FROM path_claims claim
-           JOIN worktrees worktree ON worktree.id = claim.worktree_id
-           WHERE claim.id = ? AND claim.agent_name = ? AND claim.expires_at > ?
-             AND worktree.available = 1`,
-        )
-        .get(claimId, fromAgent, now) as Row | undefined;
-      if (!claim) {
-        throw new SameTreeError(
-          conflictCode,
-          `Claim '${claimId}' is no longer transferable from ${fromAgent}.`,
-        );
-      }
-      return claim;
-    });
-    const sourceClaims = this.#database
-      .prepare(
-        `SELECT claim.*, worktree.name AS worktree_name
-         FROM path_claims claim
-         JOIN worktrees worktree ON worktree.id = claim.worktree_id
-         WHERE claim.agent_name = ? AND claim.expires_at > ?`,
-      )
-      .all(fromAgent, now) as Row[];
-    for (const selected of selectedClaims) {
-      const overlap = sourceClaims.find(
-        (candidate) =>
-          !selectedIds.includes(stringValue(candidate, 'id')) &&
-          stringValue(candidate, 'worktree_id') === stringValue(selected, 'worktree_id') &&
-          claimsOverlap(
-            {
-              comparisonPath: stringValue(selected, 'comparison_path'),
-              kind: stringValue(selected, 'kind') as ClaimKind,
-            },
-            {
-              comparisonPath: stringValue(candidate, 'comparison_path'),
-              kind: stringValue(candidate, 'kind') as ClaimKind,
-            },
-          ),
-      );
-      if (overlap) {
-        throw new SameTreeError(
-          conflictCode,
-          `Claim '${stringValue(selected, 'id')}' overlaps an unselected source claim.`,
-          { overlappingClaim: mapClaim(overlap) },
-        );
-      }
-    }
-
-    const expiresAt = now + this.config.claimTtlSeconds * 1_000;
-    const transfer = this.#database.prepare(
-      `UPDATE path_claims SET agent_name = ?, session_id = ?, expires_at = ?
-       WHERE id = ? AND agent_name = ? AND expires_at > ?`,
-    );
-    for (const claimId of selectedIds) {
-      transfer.run(this.agentName, this.sessionId, expiresAt, claimId, fromAgent, now);
-    }
-    return selectedClaims.map((claim) => ({
-      ...mapClaim(claim),
-      agentName: this.agentName,
-      expiresAt,
-    }));
-  }
-
   #nextDeliverableMessage(now: number): Row | undefined {
     return this.#database
       .prepare(
@@ -1107,7 +985,6 @@ export class Coordinator {
   heartbeat(): Session {
     const now = this.#clock();
     const sessionExpiry = now + this.config.sessionTtlSeconds * 1_000;
-    const claimExpiry = now + this.config.claimTtlSeconds * 1_000;
     const taskExpiry = now + this.config.taskLeaseSeconds * 1_000;
 
     return immediateTransaction(this.#database, () => {
@@ -1125,16 +1002,6 @@ export class Coordinator {
       this.#database
         .prepare('UPDATE agents SET last_seen_at = ? WHERE name = ?')
         .run(now, this.agentName);
-      this.#database
-        .prepare(
-          `UPDATE path_claims SET expires_at = ?
-           WHERE session_id = ? AND expires_at > ?
-             AND EXISTS (
-               SELECT 1 FROM worktrees
-               WHERE worktrees.id = path_claims.worktree_id AND worktrees.available = 1
-             )`,
-        )
-        .run(claimExpiry, this.sessionId, now);
       this.#database
         .prepare(
           `UPDATE tasks SET lease_expires_at = ?
@@ -1176,22 +1043,6 @@ export class Coordinator {
         );
       }
 
-      const claims = this.#database
-        .prepare(
-          `UPDATE path_claims SET session_id = ?, expires_at = ?
-           WHERE session_id = ? AND agent_name = ? AND expires_at > ?
-             AND EXISTS (
-               SELECT 1 FROM worktrees
-               WHERE worktrees.id = path_claims.worktree_id AND worktrees.available = 1
-             )`,
-        )
-        .run(
-          this.sessionId,
-          now + this.config.claimTtlSeconds * 1_000,
-          expiredSessionId,
-          this.agentName,
-          now,
-        ).changes;
       const tasks = this.#database
         .prepare(
           `UPDATE tasks SET claimed_by_session = ?, lease_expires_at = ?
@@ -1205,11 +1056,17 @@ export class Coordinator {
           this.agentName,
           now,
         ).changes;
-      return { claims, tasks };
+      return { claims: 0, tasks };
     });
   }
 
-  close(options: { releaseClaims?: boolean } = {}): void {
+  close(
+    options: {
+      releaseTaskLeases?: boolean;
+      /** @deprecated Use releaseTaskLeases. */
+      releaseClaims?: boolean;
+    } = {},
+  ): void {
     if (this.#closed) return;
     try {
       immediateTransaction(this.#database, () => {
@@ -1218,10 +1075,8 @@ export class Coordinator {
             'DELETE FROM message_deliveries WHERE reserved_by_session = ? AND delivered_at IS NULL',
           )
           .run(this.sessionId);
-        if (options.releaseClaims) {
-          this.#database
-            .prepare('DELETE FROM path_claims WHERE session_id = ?')
-            .run(this.sessionId);
+        const releaseTaskLeases = options.releaseTaskLeases ?? options.releaseClaims ?? false;
+        if (releaseTaskLeases) {
           this.#database
             .prepare(
               `UPDATE tasks SET claimed_by_session = NULL, lease_expires_at = NULL
@@ -1234,7 +1089,8 @@ export class Coordinator {
           .run(this.#clock(), this.sessionId);
         if (this.#recordSessionLifecycleEvents) {
           this.#recordEvent('session.closed', 'session', this.sessionId, {
-            releasedClaims: options.releaseClaims ?? false,
+            releasedClaims: false,
+            releasedTaskLeases: releaseTaskLeases,
           });
         }
       });
@@ -1881,7 +1737,7 @@ export class Coordinator {
     });
   }
 
-  claimTask(taskId: string, authorization: UserAuthorizedTaskInput = {}): Task {
+  startTask(taskId: string, authorization: StartTaskInput = {}): Task {
     const now = this.#clock();
     return immediateTransaction(this.#database, () => {
       this.#assertActiveSession(now);
@@ -1938,7 +1794,7 @@ export class Coordinator {
           now,
           taskId,
         );
-      this.#recordEvent(task.assignee ? 'task.claimed' : 'task.adopted', 'task', taskId, {
+      this.#recordEvent(task.assignee ? 'task.started' : 'task.adopted', 'task', taskId, {
         previousAssignee: task.assignee,
         title: task.title,
         ...(adoptionReason
@@ -1947,6 +1803,11 @@ export class Coordinator {
       });
       return this.#task(taskId);
     });
+  }
+
+  /** @deprecated Use startTask. */
+  claimTask(taskId: string, authorization: UserAuthorizedTaskInput = {}): Task {
+    return this.startTask(taskId, authorization);
   }
 
   forceTakeoverTask(
@@ -1966,7 +1827,6 @@ export class Coordinator {
       );
     }
     const reason = requireText(input.reason, 'Takeover reason', 2_000);
-    const claimIds = [...new Set(input.claimIds ?? [])];
     const now = this.#clock();
 
     return immediateTransaction(this.#database, () => {
@@ -1988,7 +1848,7 @@ export class Coordinator {
       if (!task.assignee) {
         throw new SameTreeError(
           'TASK_UNAVAILABLE',
-          `Task '${taskId}' is unassigned; use user-authorized task claiming to adopt it.`,
+          `Task '${taskId}' is unassigned; use user-authorized task starting to adopt it.`,
           { currentRevision: task.revision },
         );
       }
@@ -1999,7 +1859,6 @@ export class Coordinator {
       const startExecution = task.status !== 'blocked' && blockers.length === 0;
 
       const previousAssignee = task.assignee;
-      const claims = this.#transferClaims(claimIds, previousAssignee, now, 'TASK_UNAVAILABLE');
       this.#database
         .prepare(
           `UPDATE tasks SET assignee = ?, claimed_by_session = ?, lease_expires_at = ?,
@@ -2019,14 +1878,14 @@ export class Coordinator {
         previousAssignee,
         previousLeaseExpiresAt: task.leaseExpiresAt,
         previousRevision: task.revision,
-        claimIds,
+        claimIds: [],
         blockers,
         newStatus: startExecution ? 'in_progress' : task.status,
         reason,
         title: task.title,
         userAuthorized: true,
       });
-      return { task: this.#task(taskId), claims };
+      return { task: this.#task(taskId), claims: [] };
     });
   }
 
@@ -2047,7 +1906,7 @@ export class Coordinator {
           'NOT_ASSIGNED',
           task.assignee
             ? `Task '${taskId}' is assigned to ${task.assignee}.`
-            : `Claim task '${taskId}' before updating it.`,
+            : `Start task '${taskId}' before updating it.`,
         );
       }
 
@@ -2116,239 +1975,26 @@ export class Coordinator {
     });
   }
 
+  /** @deprecated Path claims were removed. This method always throws INVALID_INPUT. */
   acquireClaims(inputs: AcquireClaimInput[], ttlSeconds?: number): PathClaim[] {
-    if (inputs.length === 0 || inputs.length > 100) {
-      throw new SameTreeError('INVALID_INPUT', 'Acquire between 1 and 100 paths at once.');
-    }
-    const ttl = ttlSeconds ?? this.config.claimTtlSeconds;
-    if (!Number.isInteger(ttl) || ttl < 30 || ttl > 86_400) {
-      throw new SameTreeError('INVALID_INPUT', 'Claim TTL must be between 30 and 86400 seconds.');
-    }
-
-    const requested = inputs.map((input) => {
-      const worktree = this.#claimWorktree(input.member);
-      return {
-        ...normalizeClaim(
-          worktree.root,
-          input.path,
-          input.kind ?? (input.path.endsWith('/') ? 'tree' : 'exact'),
-          worktree.ignoreCase,
-        ),
-        worktreeId: worktree.id,
-        member: worktree.name,
-        repositoryId: worktree.repositoryId,
-      };
-    });
-    const unique = requested.filter(
-      (claim, index, all) =>
-        all.findIndex(
-          (candidate) =>
-            candidate.comparisonPath === claim.comparisonPath &&
-            candidate.kind === claim.kind &&
-            candidate.worktreeId === claim.worktreeId,
-        ) === index,
+    void inputs;
+    void ttlSeconds;
+    throw new SameTreeError(
+      'INVALID_INPUT',
+      'Path claims were removed. Coordinate overlapping edits through task-linked messages or separate worktrees.',
     );
-    const now = this.#clock();
-    const expiresAt = now + ttl * 1_000;
-
-    return immediateTransaction(this.#database, () => {
-      this.#assertActiveSession(now);
-      const availableWorktree = this.#database.prepare(
-        'SELECT 1 FROM worktrees WHERE id = ? AND available = 1',
-      );
-      for (const claim of unique) {
-        if (!availableWorktree.get(claim.worktreeId)) {
-          throw new SameTreeError(
-            'WORKSPACE_ERROR',
-            `Workspace member '${claim.member}' is unavailable.`,
-          );
-        }
-      }
-      this.#database.prepare('DELETE FROM path_claims WHERE expires_at <= ?').run(now);
-      const active = this.#database
-        .prepare(
-          `SELECT claim.*, worktree.name AS worktree_name, worktree.repository_id
-           FROM path_claims claim
-           JOIN worktrees worktree ON worktree.id = claim.worktree_id
-           WHERE claim.expires_at > ?`,
-        )
-        .all(now) as Row[];
-
-      // One agent may intentionally hold a broad claim plus narrower claims for handoff.
-      for (const claim of unique) {
-        const conflict = active.find(
-          (row) =>
-            stringValue(row, 'agent_name') !== this.agentName &&
-            stringValue(row, 'worktree_id') === claim.worktreeId &&
-            claimsOverlap(claim, {
-              comparisonPath: stringValue(row, 'comparison_path'),
-              kind: stringValue(row, 'kind') as ClaimKind,
-            }),
-        );
-        if (conflict) {
-          throw new SameTreeError(
-            'CLAIM_CONFLICT',
-            `${claim.member}:${claim.path} overlaps ${stringValue(conflict, 'agent_name')}'s active claim.`,
-            { conflictingClaim: mapClaim(conflict) },
-          );
-        }
-      }
-
-      const results: PathClaim[] = [];
-      for (const claim of unique) {
-        const own = active.find(
-          (row) =>
-            stringValue(row, 'agent_name') === this.agentName &&
-            stringValue(row, 'worktree_id') === claim.worktreeId &&
-            stringValue(row, 'comparison_path') === claim.comparisonPath &&
-            stringValue(row, 'kind') === claim.kind,
-        );
-        if (own) {
-          this.#database
-            .prepare('UPDATE path_claims SET session_id = ?, expires_at = ? WHERE id = ?')
-            .run(this.sessionId, expiresAt, stringValue(own, 'id'));
-          results.push({
-            ...mapClaim(
-              own,
-              this.#linkedClaimWarnings(
-                {
-                  comparisonPath: claim.comparisonPath,
-                  kind: claim.kind,
-                  member: claim.member,
-                  repositoryId: claim.repositoryId,
-                  worktreeId: claim.worktreeId,
-                },
-                active,
-              ),
-            ),
-            expiresAt,
-          });
-          continue;
-        }
-
-        const id = createId('claim');
-        this.#database
-          .prepare(
-            `INSERT INTO path_claims
-              (id, path, comparison_path, kind, agent_name, session_id,
-               expires_at, created_at, worktree_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            id,
-            claim.path,
-            claim.comparisonPath,
-            claim.kind,
-            this.agentName,
-            this.sessionId,
-            expiresAt,
-            now,
-            claim.worktreeId,
-          );
-        results.push({
-          id,
-          worktreeId: claim.worktreeId,
-          member: claim.member,
-          path: claim.path,
-          comparisonPath: claim.comparisonPath,
-          kind: claim.kind,
-          agentName: this.agentName,
-          expiresAt,
-          createdAt: now,
-          warnings: this.#linkedClaimWarnings(claim, active),
-        });
-        active.push({
-          id,
-          path: claim.path,
-          comparison_path: claim.comparisonPath,
-          kind: claim.kind,
-          agent_name: this.agentName,
-          session_id: this.sessionId,
-          expires_at: expiresAt,
-          created_at: now,
-          worktree_id: claim.worktreeId,
-          worktree_name: claim.member,
-          repository_id: claim.repositoryId,
-        });
-      }
-      for (const result of results) {
-        const claim = unique.find(
-          (candidate) =>
-            candidate.worktreeId === result.worktreeId &&
-            candidate.comparisonPath === result.comparisonPath &&
-            candidate.kind === result.kind,
-        );
-        if (claim) result.warnings = this.#linkedClaimWarnings(claim, active);
-      }
-      this.#recordEvent('claim.acquired', 'claim', results.map((claim) => claim.id).join(','), {
-        paths: results.map((claim) => ({ member: claim.member, path: claim.path })),
-        expiresAt,
-        warnings: results.flatMap((claim) => claim.warnings),
-      });
-      return results;
-    });
   }
 
+  /** @deprecated Path claims were removed. This method always returns an empty array. */
   listClaims(options: { includeExpired?: boolean } = {}): PathClaim[] {
-    const rows = options.includeExpired
-      ? (this.#database
-          .prepare(
-            `SELECT claim.*, worktree.name AS worktree_name, worktree.repository_id
-             FROM path_claims claim
-             JOIN worktrees worktree ON worktree.id = claim.worktree_id
-             ORDER BY worktree.name, claim.path, claim.created_at`,
-          )
-          .all() as Row[])
-      : (this.#database
-          .prepare(
-            `SELECT claim.*, worktree.name AS worktree_name, worktree.repository_id
-             FROM path_claims claim
-             JOIN worktrees worktree ON worktree.id = claim.worktree_id
-             WHERE claim.expires_at > ?
-             ORDER BY worktree.name, claim.path, claim.created_at`,
-          )
-          .all(this.#clock()) as Row[]);
-    return rows.map((row) =>
-      mapClaim(
-        row,
-        this.#linkedClaimWarnings(
-          {
-            comparisonPath: stringValue(row, 'comparison_path'),
-            kind: stringValue(row, 'kind') as ClaimKind,
-            member: stringValue(row, 'worktree_name'),
-            repositoryId: stringValue(row, 'repository_id'),
-            worktreeId: stringValue(row, 'worktree_id'),
-          },
-          rows,
-        ),
-      ),
-    );
+    void options;
+    return [];
   }
 
+  /** @deprecated Path claims were removed. This method always reports zero releases. */
   releaseClaims(input: { ids?: string[]; all?: boolean } = {}): { released: number } {
-    const ids = [...new Set(input.ids ?? [])];
-    if (!input.all && ids.length === 0) {
-      throw new SameTreeError(
-        'INVALID_INPUT',
-        'Provide claim IDs or request release of all claims.',
-      );
-    }
-
-    return immediateTransaction(this.#database, () => {
-      let released = 0;
-      if (input.all) {
-        released = this.#database
-          .prepare('DELETE FROM path_claims WHERE agent_name = ?')
-          .run(this.agentName).changes;
-      } else {
-        const remove = this.#database.prepare(
-          'DELETE FROM path_claims WHERE id = ? AND agent_name = ?',
-        );
-        for (const id of ids) released += remove.run(id, this.agentName).changes;
-      }
-      this.#recordEvent('claim.released', 'claim', ids.join(',') || '*', { released });
-      return { released };
-    });
+    void input;
+    return { released: 0 };
   }
 
   sendMessage(input: {
@@ -2562,19 +2208,16 @@ export class Coordinator {
     to: string;
     summary: string;
     context?: Record<string, unknown>;
+    /** @deprecated Path claims are no longer active and these IDs are ignored. */
     claimIds?: string[];
   }): Handoff {
     const id = createId('handoff');
     const summary = requireText(input.summary, 'Handoff summary', 20_000);
-    const claimIds = [...new Set(input.claimIds ?? [])];
-    if (claimIds.length > 100) {
-      throw new SameTreeError('INVALID_INPUT', 'Transfer at most 100 claims in one handoff.');
-    }
     const now = this.#clock();
     const expiresAt = now + this.config.handoffTtlSeconds * 1_000;
     let contextJson: string;
     try {
-      contextJson = JSON.stringify({ ...(input.context ?? {}), claimIds });
+      contextJson = JSON.stringify(input.context ?? {});
     } catch {
       throw new SameTreeError('INVALID_INPUT', 'Handoff context must be JSON serializable.');
     }
@@ -2600,18 +2243,6 @@ export class Coordinator {
           `Only in-progress work can be handed off; task '${input.taskId}' is ${task.status}.`,
         );
       }
-      for (const claimId of claimIds) {
-        const owned = this.#database
-          .prepare('SELECT 1 FROM path_claims WHERE id = ? AND agent_name = ? AND expires_at > ?')
-          .get(claimId, this.agentName, now);
-        if (!owned) {
-          throw new SameTreeError(
-            'NOT_ASSIGNED',
-            `Claim '${claimId}' is not active and owned by you.`,
-          );
-        }
-      }
-
       this.#database
         .prepare(
           `INSERT INTO handoffs
@@ -2739,12 +2370,6 @@ export class Coordinator {
             now,
             task.id,
           );
-
-        const context = parseObject(row.context_json);
-        const claimIds = Array.isArray(context.claimIds)
-          ? context.claimIds.filter((value): value is string => typeof value === 'string')
-          : [];
-        this.#transferClaims(claimIds, stringValue(row, 'from_agent'), now);
       }
 
       this.#recordEvent(`handoff.${status}`, 'handoff', handoffId, {
@@ -2756,7 +2381,7 @@ export class Coordinator {
   }
 
   getPolicy(member?: string): PolicyDocument {
-    const worktree = this.#claimWorktree(member);
+    const worktree = this.#memberWorktree(member);
     const policyPath = path.join(worktree.root, POLICY_FILE);
     if (!existsSync(policyPath)) {
       throw new SameTreeError(
@@ -2926,8 +2551,6 @@ export class Coordinator {
       const lastEvent = this.#database
         .prepare('SELECT MAX(sequence) AS sequence FROM events')
         .get() as Row;
-      const claims = this.listClaims();
-      const claimWarnings = claims.flatMap((claim) => claim.warnings);
       const instructions = this.#sharedInstructionRows(
         options.includeRevokedInstructions ?? false,
       ).map((row) => sharedInstructionSummary(mapSharedInstruction(row)));
@@ -2945,13 +2568,13 @@ export class Coordinator {
         }),
         plans: this.listPlans(),
         instructions,
-        claims,
+        claims: [],
         unreadMessages: numberValue(unread, 'count'),
         unacknowledgedInstructions: instructions.filter(
           (instruction) => instruction.acknowledgedAt === null,
         ).length,
         pendingHandoffs: numberValue(handoffs, 'count'),
-        warnings: [...branchWarnings, ...claimWarnings],
+        warnings: branchWarnings,
         lastEventSequence: nullableNumber(lastEvent, 'sequence') ?? 0,
       };
     })();
