@@ -19,5 +19,5 @@ During work:
 6. Update the task when finished; offer a handoff only as context for a user-directed transfer.
 7. Never adopt, accept, or take over another task unless the user explicitly instructs you to and provides the current revision and reason.
 
-SameTree does not reserve files or prevent overlapping edits. Coordinate likely overlap through messages, serialize writers, or use separate worktrees.
+SameTree does not reserve files, prevent overlapping edits, or restrict filesystem and tool access. Coordinate likely overlap through messages and serialize writers across joined members.
 Harness adapters deliver new messages and shared instructions automatically; do not start a manual inbox polling loop.

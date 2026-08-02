@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -16,5 +16,10 @@ describe('package metadata', () => {
     expect(plugin.version).toBe(packageMetadata.version);
     expect(plugin).not.toHaveProperty('hooks');
     expect(hooks).toHaveProperty('hooks');
+    expect(JSON.stringify(hooks)).not.toContain('guard-worktree');
+    expect((hooks.hooks as { PreToolUse: Array<{ matcher?: string }> }).PreToolUse).toEqual([
+      expect.objectContaining({ matcher: 'ExitPlanMode' }),
+    ]);
+    expect(existsSync(path.resolve('plugins/sametree/hooks/guard-worktree.mjs'))).toBe(false);
   });
 });

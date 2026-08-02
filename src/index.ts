@@ -83,11 +83,13 @@ export {
 } from './workspace.js';
 export {
   type AddWorkspaceMemberInput,
+  type AutomaticWorkspaceResult,
   addWorkspaceMember,
   type CreateWorkspaceInput,
   cancelWorkspaceCreation,
   createWorkspace,
   diagnoseWorkspace,
+  ensureAutomaticWorkspace,
   leaveWorkspace,
   pruneWorkspace,
   relinkWorkspace,

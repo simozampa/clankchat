@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "autoWorkspaceEnrollment": true,
   "sessionTtlSeconds": 90,
   "taskLeaseSeconds": 900,
   "handoffTtlSeconds": 86400,

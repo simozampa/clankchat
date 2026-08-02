@@ -39,7 +39,7 @@ Use npm from your normal shell under a supported Node.js runtime. SameTree recor
 
 ## Quick Start
 
-Run setup in every working tree that will launch a harness. Setup installs or updates integrations that keep tool calls in that launch worktree, inject peer messages, share explicitly prefixed user instructions, and automatically publish proposed Claude Code and OpenCode plans.
+Run setup in every working tree that will launch a harness. Setup installs or updates integrations that inject peer messages, share explicitly prefixed user instructions, and automatically publish proposed Claude Code and OpenCode plans.
 
 ```bash
 cd /path/to/your/project
@@ -74,9 +74,13 @@ Shared instructions are immutable, revisioned, and acknowledged per agent and re
 
 Agents can retrieve, list, and acknowledge instructions through MCP. SameTree deliberately does not expose fleet-wide instruction mutation as an MCP tool; use the native exact-prefix flow to record one, or the user-facing CLI/library to record, revise, or revoke one.
 
-## Optional Workspaces
+## Automatic Workspaces
 
-Repositories and linked worktrees are isolated by default. To share coordination across them, create a workspace from one member and add the others by workspace name or ID:
+A single repository starts as an implicit one-member workspace. When the same harness session later performs a SameTree operation from another initialized repository, SameTree automatically promotes the original standalone state and joins the observed repository. It imports both repositories' existing tasks, messages, plans, instructions, and history; derives member names from directory names; and never scans sibling directories or infers membership from remotes.
+
+The operation response includes `automaticWorkspace` with the workspace and observed member. `watch` reports `workspace.auto_created` and `member.auto_joined`. A repository already bound to another workspace produces an error instead of being rebound.
+
+Set `"autoWorkspaceEnrollment": false` in `.sametree/config.json` when all membership changes must remain explicit. Manual lifecycle commands remain available:
 
 ```bash
 cd /path/to/frontend
@@ -90,6 +94,8 @@ sametree workspace doctor
 ```
 
 Use `--fresh` to start without copying standalone coordination state. Use `--import-current` when existing tasks, messages, and history should move into the shared workspace. Both modes preserve the source database as an independent snapshot.
+
+Automatic enrollment happens only after observed SameTree activity in both repositories. Membership controls which coordination state is shared between repositories and worktrees. It does not grant, restrict, or otherwise change an agent's filesystem access.
 
 Run `sametree setup` in every workspace member that launches a harness. All members must remain on one machine and use the same local workspace registry. See [Upgrading](docs/upgrading.md) for migration, custom registry, and recovery details.
 
@@ -107,9 +113,7 @@ opencode
 
 Each process gets its own identity and joins the coordination state for that working tree. SameTree starts with the harness, so there is no server to launch separately.
 
-The generated Claude Code and OpenCode guards reject external path arguments, effective working directories outside the launch worktree, explicit shell directory changes, Git context overrides, linked-worktree operations, and branch switching or integration commands. Launch a separate harness from another worktree when an agent needs to operate there. Joining both worktrees to one optional workspace shares coordination state; it does not let either process silently act as the other member.
-
-The shell guard is deliberately conservative. Run package-specific commands from the launch root with native workspace or prefix options instead of `cd`, and avoid dynamic shell expansion in agent-issued commands. Rerun setup and restart every harness after upgrading so generated and marketplace integrations load the current guard.
+SameTree never blocks a tool call based on its path, working directory, repository membership, shell command, or Git subcommand. Agents retain whatever access their harness, user account, and operating system provide, including paths outside every SameTree workspace. Rerun setup and restart every harness after upgrading so generated integrations remove obsolete worktree guards.
 
 Automatic OpenCode delivery requires a local TUI process. Attach mode reports the identity limitation instead of consuming messages for another process.
 
@@ -120,7 +124,7 @@ Automatic OpenCode delivery requires a local TUI process. Attach mode reports th
 - Plans are revisioned shared context; publishing one does not assign review or implementation work.
 - Review requests and findings use ordinary messages with the same task and thread IDs.
 - Messages and handoffs carry context but never change an agent's scope without user authorization.
-- SameTree does not reserve files; serialize likely overlap through messages or separate worktrees.
+- SameTree does not reserve files or restrict tool access; serialize likely overlap through messages or separate worktrees.
 - Branch changes remain visible across linked-worktree workspace members.
 
 Task assignments and execution leases coordinate responsibility, not filesystem access. SameTree preserves concurrent changes and routes context, but it does not merge simultaneous edits.
@@ -135,7 +139,7 @@ SAMETREE_AGENT=human sametree status
 
 SameTree stores operational state in SQLite under Git's private directories or the local workspace registry. By default, policy and role files under `.sametree/` remain versioned with the repository. Use `setup --local` when those files and harness integrations must remain private to one local clone.
 
-SameTree is for trusted processes on one machine. Its harness guards block recognized worktree escapes cooperatively, but SameTree does not merge simultaneous edits, synchronize files, provide an operating-system sandbox, or support state databases on network and cloud-synced filesystems.
+SameTree is for trusted processes on one machine. It does not merge simultaneous edits, synchronize files, restrict harness tool access, provide an operating-system sandbox, or support state databases on network and cloud-synced filesystems.
 
 ## Documentation
 

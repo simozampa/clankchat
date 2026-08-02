@@ -106,6 +106,60 @@ describe('MCP server', () => {
     expect(text).not.toContain('\n');
   });
 
+  it('reports automatic enrollment once and recovers the promoted source session', async () => {
+    const frontend = createTestRepository();
+    const backend = createTestRepository();
+    repositories.push(frontend, backend);
+    const temporary = mkdtempSync(path.join(tmpdir(), 'sametree-mcp-auto-'));
+    temporaryDirectories.push(temporary);
+    const environment = {
+      ...getDefaultEnvironment(),
+      SAMETREE_ACTIVITY_ID: 'mcp-auto-workspace',
+      SAMETREE_AGENT: 'mcp-traveler',
+      SAMETREE_HARNESS: 'opencode',
+      SAMETREE_WORKSPACE_REGISTRY: path.join(temporary, 'registry'),
+    };
+    const connect = async (root: string) => {
+      const client = new Client({ name: 'sametree-test', version: '1.0.0' });
+      clients.push(client);
+      await client.connect(
+        new StdioClientTransport({
+          command: process.execPath,
+          args: [mcpPath],
+          cwd: root,
+          env: environment,
+          stderr: 'pipe',
+        }),
+      );
+      return client;
+    };
+    const frontendClient = await connect(frontend.root);
+    await frontendClient.callTool({ name: 'sametree_status', arguments: {} });
+    const backendClient = await connect(backend.root);
+
+    const first = await backendClient.callTool({ name: 'sametree_status', arguments: {} });
+    const second = await backendClient.callTool({ name: 'sametree_status', arguments: {} });
+    const recovered = await frontendClient.callTool({ name: 'sametree_status', arguments: {} });
+
+    expect(first.structuredContent).toMatchObject({
+      result: {
+        automaticWorkspace: {
+          created: true,
+          joined: true,
+          member: { root: backend.root },
+        },
+      },
+    });
+    expect(second.structuredContent).toMatchObject({
+      result: { workspace: { implicit: false, currentMember: path.basename(backend.root) } },
+    });
+    expect(second.structuredContent).not.toHaveProperty('result.automaticWorkspace');
+    expect(recovered.isError).not.toBe(true);
+    expect(recovered.structuredContent).toMatchObject({
+      result: { workspace: { implicit: false, currentMember: path.basename(frontend.root) } },
+    });
+  });
+
   it('replaces an expired session before the first tool call after sleep', async () => {
     const repository = createTestRepository();
     repositories.push(repository);

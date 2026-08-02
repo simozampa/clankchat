@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
+import { harnessActivityId } from './activity.js';
 import { Coordinator } from './coordinator.js';
 import { errorResult, isSameTreeError } from './errors.js';
 import { runWithInstallRuntime } from './runtime.js';
@@ -22,6 +23,7 @@ const nativeSession =
     : harness === 'opencode'
       ? process.env.OPENCODE_PID
       : undefined;
+const activityId = process.env.SAMETREE_ACTIVITY_ID ?? harnessActivityId(harness, nativeSession);
 const automaticSuffix =
   nativeSession?.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^-+|-+$/gu, '') || String(process.pid);
 const agent = process.env.SAMETREE_AGENT || `${harness}-${automaticSuffix}`.slice(0, 80);
@@ -29,6 +31,7 @@ function openCoordinator(): Coordinator {
   return Coordinator.open({
     agent,
     harness,
+    ...(activityId ? { activityId } : {}),
     role: process.env.SAMETREE_ROLE ?? 'implementer',
     cwd: process.env.SAMETREE_CWD ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd(),
     ...(process.env.SAMETREE_WORKSPACE_REGISTRY
@@ -53,9 +56,11 @@ const server = new McpServer({ name: 'sametree', version: VERSION });
 const outputSchema = { result: z.unknown() };
 
 function result(value: unknown) {
-  const structuredContent = { result: value };
+  const automaticWorkspace = coordinator.takeAutomaticWorkspace();
+  const response = automaticWorkspace ? { result: value, automaticWorkspace } : value;
+  const structuredContent = { result: response };
   return {
-    content: [{ type: 'text' as const, text: JSON.stringify(value) }],
+    content: [{ type: 'text' as const, text: JSON.stringify(response) }],
     structuredContent,
   };
 }

@@ -132,18 +132,13 @@ Input normalization and broad filesystem inspection happen before a transaction.
 
 Status observes full porcelain-v2 branch, commit, and dirty state for the caller's current member. It also refreshes each available member's cheap HEAD descriptor. A branch transition records `worktree.branch_changed`; active sessions started on a different branch produce `BRANCH_CHANGED`. Ordinary commits on one branch and detached-HEAD commits do not create false branch-switch events. Branch changes do not cancel leases.
 
-## Worktree Boundary Safety
+## Harness Access
 
-Generated Claude Code and OpenCode integrations validate recognized tool calls before execution. Each harness process remains bound to the physical worktree where it launched. The guard canonicalizes structured paths and effective working directories, then rejects:
+SameTree does not participate in harness authorization. Generated Claude Code and OpenCode integrations deliver coordination context and publish explicit instructions or plans, but they do not inspect or reject tool calls. Paths, working directories, repository membership, shell commands, and Git subcommands are outside SameTree's decision model.
 
-- Absolute paths, parent traversal, symbolic-link escapes, and nested-repository escapes outside the launch worktree.
-- Explicit shell directory changes and dynamic shell expansion that prevents reliable path inspection.
-- Git context overrides, worktree operations, branch switching, and branch integration commands.
-- Tool-specific repository or working-directory arguments that select another member.
+The local registry records direct harness activity routes without scanning repositories. When one activity ID opens SameTree from a second repository, a registry-wide lock serializes promotion of the first standalone database and import of the observed member. Existing state is copied with its IDs and event provenance, and a conflicting existing binding aborts before promotion. Manual lifecycle commands remain available, while the agent MCP surface exposes no direct create/join tool. Membership determines which coordination database a member uses; it neither grants access to joined members nor blocks access to unjoined repositories.
 
-An explicit SameTree workspace shares coordination state but does not broaden a harness process's filesystem boundary. Launch a separate harness in another member when work must happen there.
-
-The guard is cooperative preflight validation, not process isolation. It cannot constrain an opaque executable after launch or prevent a same-user process from changing files directly. SameTree does not reserve paths; agents coordinate likely overlap through task-linked messages or separate worktrees.
+SameTree does not reserve paths. Agents coordinate likely overlap through task-linked messages before writing across members or elsewhere.
 
 ## Leases and Crashes
 

@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
+  readFileSync,
   renameSync,
   rmSync,
   symlinkSync,
@@ -34,6 +35,7 @@ import {
   cancelWorkspaceCreation,
   createWorkspace,
   diagnoseWorkspace,
+  ensureAutomaticWorkspace,
   leaveWorkspace,
   pruneWorkspace,
   relinkWorkspace,
@@ -66,11 +68,17 @@ function git(root: string, args: string[]): string {
   }).trim();
 }
 
-function open(root: string, agent: string, workspaceRegistryRoot?: string): Coordinator {
+function open(
+  root: string,
+  agent: string,
+  workspaceRegistryRoot?: string,
+  activityId?: string,
+): Coordinator {
   const coordinator = Coordinator.open({
     cwd: root,
     agent,
     ...(workspaceRegistryRoot ? { workspaceRegistryRoot } : {}),
+    ...(activityId ? { activityId } : {}),
   });
   coordinators.push(coordinator);
   return coordinator;
@@ -85,6 +93,188 @@ afterEach(() => {
 });
 
 describe('workspace operations', () => {
+  it('keeps a single observed repository standalone', () => {
+    const source = repository();
+    const registry = registryRoot();
+    const agent = open(source.root, 'solo', registry, 'activity-solo');
+
+    expect(agent.snapshot().workspace.implicit).toBe(true);
+    expect(agent.automaticWorkspace).toBeNull();
+    expect(listRegisteredWorkspaces({ registryRoot: registry })).toEqual([]);
+  });
+
+  it('automatically promotes and joins repositories while preserving both states', () => {
+    const frontend = repository();
+    const backend = repository();
+    const unobserved = repository();
+    const registry = registryRoot();
+    const backendAgent = open(backend.root, 'backend-author');
+    const backendTask = backendAgent.createTask({ title: 'Backend history' });
+    const backendMessage = backendAgent.sendMessage({
+      subject: 'Backend history',
+      body: 'Preserve this message.',
+    });
+    backendAgent.close();
+
+    const frontendAgent = open(frontend.root, 'traveler', registry, 'activity-cross-repo');
+    const frontendTask = frontendAgent.createTask({ title: 'Frontend history' });
+    frontendAgent.startTask(frontendTask.id);
+    const frontendMessage = frontendAgent.sendMessage({
+      subject: 'Frontend history',
+      body: 'Preserve this message too.',
+    });
+    const crossed = open(backend.root, 'traveler', registry, 'activity-cross-repo');
+    const automatic = crossed.automaticWorkspace;
+    if (!automatic) throw new Error('Expected automatic workspace enrollment.');
+
+    expect(automatic).toMatchObject({
+      created: true,
+      joined: true,
+      member: { name: path.basename(backend.root), root: backend.root },
+    });
+    expect(crossed.takeAutomaticWorkspace()).toEqual(automatic);
+    expect(crossed.automaticWorkspace).toBeNull();
+    expect(crossed.snapshot()).toMatchObject({
+      workspace: { implicit: false },
+      members: expect.arrayContaining([
+        expect.objectContaining({ root: frontend.root }),
+        expect.objectContaining({ root: backend.root }),
+      ]),
+    });
+    expect(() => frontendAgent.heartbeat()).toThrow(/session expired/u);
+    const restarted = open(frontend.root, 'traveler', registry);
+    expect(restarted.snapshot().workspace.implicit).toBe(false);
+    expect(restarted.recoverLeasesFromExpiredSession(frontendAgent.sessionId)).toEqual({
+      claims: 0,
+      tasks: 1,
+    });
+    expect(crossed.listTasks({ includeTerminal: true }).map((task) => task.id)).toEqual(
+      expect.arrayContaining([frontendTask.id, backendTask.id]),
+    );
+    const database = new Database(automatic.workspace.databasePath, {
+      readonly: true,
+    });
+    expect(
+      database
+        .prepare('SELECT id FROM messages WHERE id IN (?, ?) ORDER BY id')
+        .all(frontendMessage.id, backendMessage.id),
+    ).toHaveLength(2);
+    expect(
+      database
+        .prepare(
+          `SELECT kind FROM events
+           WHERE kind IN ('workspace.auto_created', 'member.auto_joined')
+           ORDER BY kind`,
+        )
+        .all(),
+    ).toEqual([{ kind: 'member.auto_joined' }, { kind: 'workspace.auto_created' }]);
+    database.close();
+    expect(
+      resolveWorkspaceBinding(resolveRepository(unobserved.root), { registryRoot: registry }),
+    ).toBeNull();
+  });
+
+  it('rejects automatic enrollment into a different bound workspace', () => {
+    const frontend = repository();
+    const backend = repository();
+    const registry = registryRoot();
+    const traveler = open(frontend.root, 'traveler', registry, 'activity-conflict');
+    traveler.close();
+    createWorkspace(
+      backend.root,
+      { name: 'Other', memberName: 'backend', mode: 'fresh' },
+      { registryRoot: registry },
+    );
+
+    expect(() => open(backend.root, 'traveler', registry, 'activity-conflict')).toThrow(
+      /already bound to a different workspace/u,
+    );
+    expect(
+      resolveWorkspaceBinding(resolveRepository(frontend.root), { registryRoot: registry }),
+    ).toBe(null);
+  });
+
+  it('preflights a conflicting repository binding on an unbound linked worktree', () => {
+    const frontend = repository();
+    const main = repository();
+    const registry = registryRoot();
+    git(main.root, ['add', '.']);
+    git(main.root, [
+      '-c',
+      'user.name=SameTree Test',
+      '-c',
+      'user.email=sametree@example.com',
+      'commit',
+      '-m',
+      'test: initialize repository',
+    ]);
+    createWorkspace(
+      main.root,
+      { name: 'Other', memberName: 'main', mode: 'fresh' },
+      { registryRoot: registry },
+    );
+    const linkedRoot = `${main.root}-unbound-linked`;
+    const active = open(frontend.root, 'active-frontend');
+    try {
+      git(main.root, ['worktree', 'add', '-b', 'unbound-linked', linkedRoot]);
+
+      expect(() =>
+        ensureAutomaticWorkspace(frontend.root, linkedRoot, { registryRoot: registry }),
+      ).toThrow(/already bound to a different workspace/u);
+      expect(active.heartbeat()).toMatchObject({ status: 'active' });
+      expect(
+        resolveWorkspaceBinding(resolveRepository(frontend.root), { registryRoot: registry }),
+      ).toBeNull();
+      const linkedActive = open(linkedRoot, 'linked-active');
+      expect(() =>
+        ensureAutomaticWorkspace(linkedRoot, frontend.root, { registryRoot: registry }),
+      ).toThrow(/Primary worktree repository is already assigned/u);
+      expect(linkedActive.heartbeat()).toMatchObject({ status: 'active' });
+    } finally {
+      git(main.root, ['worktree', 'remove', '--force', linkedRoot]);
+    }
+  });
+
+  it('deduplicates an automatically derived member name', () => {
+    const frontend = repository();
+    const backend = repository();
+    const registry = registryRoot();
+    const backendName = path.basename(backend.root);
+    createWorkspace(
+      frontend.root,
+      { name: 'Product', memberName: backendName, mode: 'fresh' },
+      { registryRoot: registry },
+    );
+    const traveler = open(frontend.root, 'traveler', registry, 'activity-member-name');
+    traveler.close();
+    const observed = open(backend.root, 'traveler', registry, 'activity-member-name');
+
+    expect(observed.automaticWorkspace).toMatchObject({
+      created: false,
+      joined: true,
+      member: { name: `${backendName}-2` },
+    });
+  });
+
+  it('respects disabled automatic workspace enrollment', () => {
+    const frontend = repository();
+    const backend = repository();
+    const registry = registryRoot();
+    const configPath = path.join(frontend.root, '.sametree', 'config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      configPath,
+      `${JSON.stringify({ ...config, autoWorkspaceEnrollment: false }, null, 2)}\n`,
+    );
+    const traveler = open(frontend.root, 'traveler', registry, 'activity-disabled');
+    traveler.close();
+    const observed = open(backend.root, 'traveler', registry, 'activity-disabled');
+
+    expect(observed.automaticWorkspace).toBeNull();
+    expect(observed.snapshot().workspace.implicit).toBe(true);
+    expect(listRegisteredWorkspaces({ registryRoot: registry })).toEqual([]);
+  });
+
   it('creates a fresh workspace while preserving standalone state', () => {
     const source = repository();
     const registry = registryRoot();
@@ -826,6 +1016,42 @@ describe('workspace operations', () => {
     expect(listRegisteredWorkspaces({ registryRoot: registry })).toHaveLength(1);
   });
 
+  it('resumes an interrupted automatic workspace creation', () => {
+    const frontend = repository();
+    const backend = repository();
+    const registry = registryRoot();
+    const active = open(frontend.root, 'active-agent');
+    expect(() =>
+      createWorkspace(
+        frontend.root,
+        {
+          name: 'Recorded Product',
+          memberName: 'recorded-frontend',
+          mode: 'import-current',
+        },
+        { registryRoot: registry },
+      ),
+    ).toThrow(/Stop active standalone sessions/u);
+    const [pending] = listRegisteredWorkspaces({ registryRoot: registry });
+    if (!pending) throw new Error('Expected a pending automatic workspace registration.');
+    writePendingWorkspaceJoin(resolveRepository(frontend.root), {
+      workspaceId: pending.id,
+      memberName: 'recorded-frontend',
+      mode: 'import-current',
+    });
+
+    expect(
+      ensureAutomaticWorkspace(frontend.root, backend.root, { registryRoot: registry }),
+    ).toMatchObject({
+      created: true,
+      joined: true,
+      workspace: { id: pending.id, name: 'Recorded Product' },
+    });
+    expect(() => active.heartbeat()).toThrow(/session expired/u);
+    const events = open(backend.root, 'observer', registry).events({ limit: 100 });
+    expect(events.filter((event) => event.kind === 'workspace.auto_created')).toHaveLength(1);
+  });
+
   it('cancels a pending creation before any member was recorded', () => {
     const source = repository();
     const joining = repository();
@@ -908,6 +1134,47 @@ describe('workspace operations', () => {
         { registryRoot: registry },
       ),
     ).toMatchObject({ member: { id: 'worktree_interrupted_add' } });
+  });
+
+  it('resumes an interrupted automatic join with its recorded member name', () => {
+    const frontend = repository();
+    const backend = repository();
+    const registry = registryRoot();
+    const workspace = createWorkspace(
+      frontend.root,
+      { name: 'Product', memberName: 'frontend', mode: 'fresh' },
+      { registryRoot: registry },
+    );
+    const backendContext = resolveRepository(backend.root);
+    writePendingWorkspaceJoin(backendContext, {
+      workspaceId: workspace.workspace.id,
+      memberName: 'recorded-backend',
+      mode: 'import-current',
+    });
+    const target = openDatabase(backendContext, {
+      databasePath: workspace.workspace.databasePath,
+      member: {
+        workspaceId: workspace.workspace.id,
+        workspaceName: workspace.workspace.name,
+        workspaceImplicit: false,
+        repositoryId: 'repository_interrupted_automatic_add',
+        repositoryName: 'recorded-backend',
+        worktreeId: 'worktree_interrupted_automatic_add',
+        worktreeName: 'recorded-backend',
+      },
+    });
+    target.close();
+
+    expect(
+      ensureAutomaticWorkspace(frontend.root, backend.root, { registryRoot: registry }),
+    ).toMatchObject({
+      created: false,
+      joined: true,
+      member: { id: 'worktree_interrupted_automatic_add', name: 'recorded-backend' },
+    });
+    expect(readPendingWorkspaceJoin(backendContext)).toBeNull();
+    const events = open(frontend.root, 'observer', registry).events({ limit: 100 });
+    expect(events.filter((event) => event.kind === 'member.auto_joined')).toHaveLength(1);
   });
 
   it('clears a join intent after a recoverable preflight collision', () => {
