@@ -18,6 +18,9 @@ import {
   LEGACY_POLICY_TEMPLATE,
   LEGACY_REVIEWER_ROLE_TEMPLATE,
   PLAN_INTEGRATION_TEMPLATE,
+  REVIEW_CONFIG_TEMPLATE,
+  REVIEW_INTEGRATION_TEMPLATE,
+  REVIEW_POLICY_TEMPLATE,
 } from '../src/templates.js';
 import { createTestRepository, type TestRepository } from './helpers.js';
 
@@ -142,6 +145,22 @@ describe('generated state paths', () => {
     expect(readFileSync(policyPath, 'utf8')).toContain('task-linked message');
     expect(readFileSync(coordinationPath, 'utf8')).toContain('does not reserve files');
     expect(readFileSync(implementerPath, 'utf8')).toContain('task-linked review request');
+
+    writeFileSync(configPath, REVIEW_CONFIG_TEMPLATE);
+    writeFileSync(policyPath, REVIEW_POLICY_TEMPLATE);
+    writeFileSync(coordinationPath, REVIEW_INTEGRATION_TEMPLATE);
+    expect(initializeProject(repository.root).updated).toEqual([
+      '.sametree/config.json',
+      '.sametree/policy.md',
+      '.sametree/coordination.md',
+    ]);
+    expect(JSON.parse(readFileSync(configPath, 'utf8'))).toMatchObject({
+      autoWorkspaceEnrollment: true,
+    });
+    expect(readFileSync(policyPath, 'utf8')).toContain('never restricts filesystem or tool access');
+    expect(readFileSync(coordinationPath, 'utf8')).toContain(
+      'does not reserve files, prevent overlapping edits, or restrict filesystem and tool access',
+    );
 
     writeFileSync(policyPath, '# Custom policy\n\nOnly the user assigns work.\n');
     expect(initializeProject(repository.root).preserved).toContain('.sametree/policy.md');

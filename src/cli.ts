@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { Command, Option } from 'commander';
 
+import { harnessActivityId } from './activity.js';
 import { Coordinator } from './coordinator.js';
 import { diagnoseRepository } from './doctor.js';
 import { errorResult, SameTreeError } from './errors.js';
@@ -28,7 +29,6 @@ import {
   workspaceMembers,
   workspaceStatus,
 } from './workspace-service.js';
-import { assertWorktreeBoundary } from './worktree-guard.js';
 
 interface GlobalOptions {
   agent?: string;
@@ -80,12 +80,34 @@ function openCoordinator(
   identity: { agent?: string; harness?: Harness; role?: string } = {},
 ): Coordinator {
   const options = command.optsWithGlobals<GlobalOptions>();
+  const inferredHarness = process.env.CLAUDE_CODE_SESSION_ID
+    ? 'claude-code'
+    : process.env.OPENCODE_PID
+      ? 'opencode'
+      : undefined;
+  const harness =
+    identity.harness ??
+    (options.harness === 'other' && inferredHarness ? inferredHarness : options.harness);
+  const nativeSession =
+    harness === 'claude-code'
+      ? process.env.CLAUDE_CODE_SESSION_ID
+      : harness === 'opencode'
+        ? process.env.OPENCODE_PID
+        : undefined;
+  const activityId = process.env.SAMETREE_ACTIVITY_ID ?? harnessActivityId(harness, nativeSession);
+  const automaticAgent = nativeSession
+    ? `${harness}-${nativeSession.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^-+|-+$/gu, '') || process.pid}`.slice(
+        0,
+        80,
+      )
+    : '';
   return Coordinator.open({
-    agent: identity.agent ?? options.agent ?? process.env.SAMETREE_AGENT ?? '',
+    agent: identity.agent ?? options.agent ?? process.env.SAMETREE_AGENT ?? automaticAgent,
     cwd: options.cwd,
-    harness: identity.harness ?? options.harness,
+    harness,
     role: identity.role ?? options.role,
     ...(options.workspaceRegistry ? { workspaceRegistryRoot: options.workspaceRegistry } : {}),
+    ...(activityId ? { activityId } : {}),
     ...coordinatorOptions,
   });
 }
@@ -107,7 +129,10 @@ function runWithCoordinator<T>(
   let operationError: unknown;
   try {
     const result = operation(coordinator);
-    if (options.printResult !== false) print(result);
+    if (options.printResult !== false) {
+      const automaticWorkspace = coordinator.takeAutomaticWorkspace();
+      print(automaticWorkspace ? { result, automaticWorkspace } : result);
+    }
   } catch (error) {
     operationFailed = true;
     operationError = error;
@@ -137,6 +162,7 @@ async function runStreaming(
   let operationFailed = false;
   let operationError: unknown;
   try {
+    coordinator.takeAutomaticWorkspace();
     await operation(coordinator, controller.signal);
   } catch (error) {
     operationFailed = true;
@@ -987,10 +1013,6 @@ hooks.command('install').action((_options: unknown, command: Command) => {
 });
 
 const hook = program.command('hook', { hidden: true });
-hook.command('worktree-guard').action((_options: unknown, command: Command) => {
-  const globals = command.optsWithGlobals<GlobalOptions>();
-  assertWorktreeBoundary(globals.cwd, objectJson(readFileSync(0, 'utf8')));
-});
 hook.command('pre-commit').action((_options: unknown, command: Command) => {
   const globals = command.optsWithGlobals<GlobalOptions>();
   print(checkPreCommit(globals.cwd));

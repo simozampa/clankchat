@@ -11,6 +11,7 @@ export const POLICY_FILE = path.join(CONFIG_DIRECTORY, 'policy.md');
 
 export const configSchema = z.object({
   schemaVersion: z.literal(1),
+  autoWorkspaceEnrollment: z.boolean().default(true),
   sessionTtlSeconds: z.number().int().min(30).max(3600),
   taskLeaseSeconds: z.number().int().min(30).max(86400),
   handoffTtlSeconds: z.number().int().min(60).max(604800),
@@ -23,6 +24,7 @@ export type SameTreeConfig = z.infer<typeof configSchema>;
 
 export const DEFAULT_CONFIG: SameTreeConfig = {
   schemaVersion: 1,
+  autoWorkspaceEnrollment: true,
   sessionTtlSeconds: 90,
   taskLeaseSeconds: 900,
   handoffTtlSeconds: 86_400,

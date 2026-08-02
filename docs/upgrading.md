@@ -2,6 +2,14 @@
 
 SameTree is pre-1.0 alpha software. Back up coordination state before upgrades and do not mix versions against the same database.
 
+## Upgrade To 0.1.8
+
+Version 0.1.8 removes SameTree's worktree guards and adds automatic multi-repository workspaces. SameTree no longer inspects or blocks tool calls based on paths, working directories, repository membership, shell commands, or Git subcommands. Workspace membership scopes shared coordination state only and does not control filesystem access.
+
+Stop active harnesses, install `npm install --global sametree@0.1.8 --force`, rerun setup for each configured harness, and restart those harnesses. Rerunning setup is mandatory: it removes exact stale SameTree guard handlers from project Claude settings, updates the Claude plugin so only instruction and plan hooks remain, and rewrites the generated OpenCode plugin without guard callbacks. The old guard files and CLI subcommand no longer exist.
+
+After restart, the first SameTree operation in one repository remains standalone. If the same native harness session performs a SameTree operation in another initialized repository, SameTree imports the original state into a new explicit workspace and joins the observed repository with its existing state. The response names the workspace and member, and the transition appears in `watch`. Set `"autoWorkspaceEnrollment": false` in `.sametree/config.json` before restart to require manual workspace commands.
+
 ## Upgrade To 0.1.7
 
 Version 0.1.7 removes active path claims and centers coordination on user-assigned task execution plus task-linked review messages. The claim CLI and MCP tools are gone, task start replaces task claim, takeover and handoff no longer transfer claims, and Git pre-commit checks no longer inspect path ownership. Existing `path_claims` rows and historical claim events remain archived in SQLite, while status and compatibility library methods expose no active claims.
@@ -18,14 +26,14 @@ Opening a database with 0.1.7 records schema version 7 so older binaries reject 
 
 ## Upgrade To 0.1.6
 
-Version 0.1.6 adds fail-closed Claude Code and OpenCode worktree guards. Tool paths and effective working directories must remain in the worktree where each harness launched; recognized shell context changes, Git worktree operations, branch switching, and branch integration commands are rejected before execution. Optional workspaces still share coordination between members, but each member now requires its own harness process for filesystem operations.
+Version 0.1.6 added fail-closed Claude Code and OpenCode worktree guards. These guards are removed in 0.1.8 and are not part of the current coordination model.
 
 1. Stop every Claude Code, OpenCode, SameTree MCP, watcher, and message follower process using the coordination database.
 2. Install `npm install --global sametree@0.1.6 --force` from your normal Node.js shell.
 3. Rerun `sametree setup --claude --opencode`, adding `--local` for personal-only coordination and omitting unused harnesses.
 4. Restart every Claude Code and OpenCode process so they load the new generated OpenCode plugin and Claude marketplace hook.
 
-The shell guard rejects `cd`, `pushd`, `source`, `git -C`, Git worktree and branch-integration commands, external absolute or parent paths, and dynamic shell expansion. Prefer package-manager workspace or prefix options from the launch root. The guard is cooperative validation rather than an operating-system sandbox; review the remaining same-user and opaque-command limitations in [Security](../SECURITY.md).
+Do not remain on 0.1.6 when unrestricted harness access is required. Upgrade to 0.1.8 or later, rerun setup, and restart the harnesses to remove generated guard registrations.
 
 ## Upgrade To 0.1.5
 

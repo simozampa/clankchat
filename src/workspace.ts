@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   type Dirent,
   lstatSync,
@@ -15,6 +16,7 @@ import Database from 'better-sqlite3';
 import { z } from 'zod';
 
 import { SameTreeError } from './errors.js';
+import { writeTextFileAtomic } from './files.js';
 import type { RepositoryContext } from './git.js';
 
 const REGISTRY_SCHEMA_VERSION = 1;
@@ -38,6 +40,16 @@ const workspaceRegistrationSchema = z
     id: identifierSchema,
     name: z.string().trim().min(1).max(100),
     createdAt: z.number().int().nonnegative(),
+  })
+  .strict();
+const activityRouteSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    activityKey: z.string().min(1).max(500),
+    root: z.string().min(1),
+    privateGitDirectory: z.string().min(1),
+    commonGitDirectory: z.string().min(1),
+    updatedAt: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -78,6 +90,7 @@ const pendingWorkspaceJoinSchema = z
   .strict();
 
 export type WorkspaceRegistration = z.infer<typeof workspaceRegistrationSchema>;
+export type ActivityRoute = z.infer<typeof activityRouteSchema>;
 export type RepositoryWorkspaceBinding = z.infer<typeof repositoryBindingSchema>;
 export type WorktreeWorkspaceBinding = z.infer<typeof worktreeBindingSchema>;
 export type PendingWorkspaceCreation = z.infer<typeof pendingWorkspaceCreationSchema>;
@@ -228,6 +241,11 @@ function workspaceDirectory(workspaceId: string, options: WorkspaceRegistryOptio
   return path.join(registryRoot(options), id);
 }
 
+function activityRoutePath(activityKey: string, options: WorkspaceRegistryOptions): string {
+  const digest = createHash('sha256').update(activityKey).digest('hex');
+  return path.join(registryRoot(options), '.activity', `${digest}.json`);
+}
+
 function repositoryBindingPath(repository: RepositoryContext): string {
   return path.join(repository.commonGitDirectory, 'sametree', REPOSITORY_BINDING_FILE);
 }
@@ -307,6 +325,43 @@ export function findRegisteredWorkspace(
   };
 }
 
+export function readActivityRoute(
+  activityKey: string,
+  options: WorkspaceRegistryOptions = {},
+): ActivityRoute | null {
+  return readOptionalFile(
+    activityRoutePath(activityKey, options),
+    activityRouteSchema,
+    'activity route',
+  );
+}
+
+export function writeActivityRoute(
+  activityKey: string,
+  repository: RepositoryContext,
+  updatedAt: number,
+  options: WorkspaceRegistryOptions = {},
+): ActivityRoute {
+  const route = parseValue(
+    {
+      schemaVersion: 1,
+      activityKey,
+      root: repository.root,
+      privateGitDirectory: repository.privateGitDirectory,
+      commonGitDirectory: repository.commonGitDirectory,
+      updatedAt,
+    },
+    activityRouteSchema,
+    'activity route',
+  );
+  const target = activityRoutePath(activityKey, options);
+  assertNoSymlinkComponents(target);
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  assertNoSymlinkComponents(target);
+  writeTextFileAtomic(target, `${JSON.stringify(route, null, 2)}\n`, 0o600);
+  return route;
+}
+
 export function removeRegisteredWorkspace(
   workspaceId: string,
   options: WorkspaceRegistryOptions = {},
@@ -342,7 +397,7 @@ export function listRegisteredWorkspaces(
     });
   }
   return entries
-    .filter((entry) => entry.isDirectory() && entry.name !== '.locks')
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
     .map((entry) => readRegisteredWorkspace(entry.name, options))
     .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
@@ -715,6 +770,16 @@ export function acquireRegisteredWorkspaceOperationLock(
   const id = parseValue(workspaceId, identifierSchema, 'workspace ID');
   return acquireSqliteLock(
     path.join(registryRoot(options), '.locks', `${id}.sqlite3`),
+    waitMilliseconds,
+  );
+}
+
+export function acquireAutomaticWorkspaceOperationLock(
+  options: WorkspaceRegistryOptions = {},
+  waitMilliseconds = 0,
+): () => void {
+  return acquireSqliteLock(
+    path.join(registryRoot(options), '.locks', 'automatic-workspaces.sqlite3'),
     waitMilliseconds,
   );
 }

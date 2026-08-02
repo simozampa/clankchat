@@ -45,10 +45,16 @@ import type {
 import {
   acquireWorkspaceOperationLock,
   clearMatchingPendingWorkspaceJoin,
+  readActivityRoute,
   resolveWorkspaceBinding,
   type WorkspaceContext,
+  writeActivityRoute,
 } from './workspace.js';
-import { assertWorkspaceBindingReady } from './workspace-service.js';
+import {
+  type AutomaticWorkspaceResult,
+  assertWorkspaceBindingReady,
+  ensureAutomaticWorkspace,
+} from './workspace-service.js';
 
 type Row = Record<string, unknown>;
 const MAX_HANDOFF_CONTEXT_BYTES = 100_000;
@@ -79,6 +85,7 @@ export interface CoordinatorOptions {
   databasePath?: string;
   workspaceRegistryRoot?: string;
   clock?: () => number;
+  activityId?: string;
   recordSessionLifecycleEvents?: boolean;
 }
 
@@ -444,6 +451,7 @@ export class Coordinator {
   readonly workspace: WorkspaceContext | null;
   readonly worktreeId: string;
 
+  #automaticWorkspace: AutomaticWorkspaceResult | null;
   readonly #database: DatabaseType;
   readonly #clock: () => number;
   readonly #recordSessionLifecycleEvents: boolean;
@@ -456,6 +464,32 @@ export class Coordinator {
     this.harness = options.harness ?? 'other';
     this.#clock = options.clock ?? Date.now;
     this.#recordSessionLifecycleEvents = options.recordSessionLifecycleEvents ?? true;
+    const registryOptions = {
+      ...(options.workspaceRegistryRoot ? { registryRoot: options.workspaceRegistryRoot } : {}),
+    };
+    const activityId = options.activityId?.trim();
+    const activityKey = activityId ? `${this.harness}:${activityId}` : null;
+    const route = activityKey ? readActivityRoute(activityKey, registryOptions) : null;
+    let routedRepository: RepositoryContext | null = null;
+    if (route && route.privateGitDirectory !== this.repository.privateGitDirectory) {
+      try {
+        routedRepository = resolveRepository(route.root);
+      } catch {
+        routedRepository = null;
+      }
+      if (
+        routedRepository?.privateGitDirectory !== route.privateGitDirectory ||
+        routedRepository.commonGitDirectory !== route.commonGitDirectory
+      ) {
+        routedRepository = null;
+      }
+    }
+    this.#automaticWorkspace = routedRepository
+      ? ensureAutomaticWorkspace(routedRepository.root, this.repository.root, {
+          ...registryOptions,
+          now: this.#clock(),
+        })
+      : null;
     const releaseWorkspaceLock = acquireWorkspaceOperationLock(this.repository, 2_500);
     try {
       this.workspace = resolveWorkspaceBinding(this.repository, {
@@ -500,6 +534,9 @@ export class Coordinator {
       });
       this.worktreeId = databaseWorktreeId(this.#database, this.repository);
       this.sessionId = createId('session');
+      if (activityKey) {
+        writeActivityRoute(activityKey, this.repository, this.#clock(), registryOptions);
+      }
 
       const now = this.#clock();
       try {
@@ -558,6 +595,16 @@ export class Coordinator {
       );
     }
     return new Coordinator(options);
+  }
+
+  get automaticWorkspace(): AutomaticWorkspaceResult | null {
+    return this.#automaticWorkspace;
+  }
+
+  takeAutomaticWorkspace(): AutomaticWorkspaceResult | null {
+    const automaticWorkspace = this.#automaticWorkspace;
+    this.#automaticWorkspace = null;
+    return automaticWorkspace;
   }
 
   #recordEvent(
@@ -1034,7 +1081,7 @@ export class Coordinator {
         !expired ||
         stringValue(expired, 'agent_name') !== this.agentName ||
         stringValue(expired, 'home_worktree_id') !== this.worktreeId ||
-        stringValue(expired, 'status') !== 'active' ||
+        !['active', 'closed'].includes(stringValue(expired, 'status')) ||
         numberValue(expired, 'expires_at') > now
       ) {
         throw new SameTreeError(

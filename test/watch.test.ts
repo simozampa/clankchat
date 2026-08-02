@@ -76,6 +76,31 @@ describe('event watch', () => {
     );
   });
 
+  it('formats automatic workspace transitions', () => {
+    expect(
+      formatEvent(
+        event(8, {
+          kind: 'workspace.auto_created',
+          actor: 'workspace',
+          entityType: 'workspace',
+          entityId: 'workspace-1',
+          payload: { workspace: 'Product' },
+        }),
+      ),
+    ).toContain('automatically created workspace Product');
+    expect(
+      formatEvent(
+        event(9, {
+          kind: 'member.auto_joined',
+          actor: 'workspace',
+          entityType: 'worktree',
+          entityId: 'worktree-1',
+          payload: { member: 'backend' },
+        }),
+      ),
+    ).toContain('automatically joined member backend');
+  });
+
   it('formats proposed plan revisions without printing their bodies', () => {
     const formatted = formatEvent(
       event(8, {

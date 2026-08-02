@@ -1,6 +1,6 @@
 {
   "name": "sametree",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Local task and review coordination for coding agents",
   "keywords": [
     "agent",
@@ -55,6 +55,7 @@
     "format": "biome format --write .",
     "lint": "biome check .",
     "postinstall": "node scripts/record-install-runtime.mjs",
+    "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepack": "npm run build",
     "test": "npm run build && vitest run",
     "test:watch": "vitest",

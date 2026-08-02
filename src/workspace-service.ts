@@ -3,7 +3,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import path from 'node:path';
 
 import Database, { type Database as DatabaseType } from 'better-sqlite3';
-
+import { loadConfig } from './config.js';
 import {
   assertDatabasePathSafe,
   beginImmediate,
@@ -15,6 +15,7 @@ import {
 import { SameTreeError } from './errors.js';
 import { type RepositoryContext, resolveRepository } from './git.js';
 import {
+  acquireAutomaticWorkspaceOperationLock,
   acquireRegisteredWorkspaceOperationLock,
   acquireRepositoryOperationLock,
   acquireRepositoryOperationLockAt,
@@ -28,6 +29,7 @@ import {
   clearRepositoryWorkspaceBindingAt,
   clearWorktreeWorkspaceBinding,
   findRegisteredWorkspace,
+  listRegisteredWorkspaces,
   type RegisteredWorkspace,
   readPendingWorkspaceCreation,
   readPendingWorkspaceJoin,
@@ -65,6 +67,8 @@ export type WorkspaceJoinMode = 'fresh' | 'import-current';
 
 export interface WorkspaceServiceOptions extends WorkspaceRegistryOptions {
   now?: number;
+  worktreeLockHeld?: boolean;
+  automaticEventKind?: 'workspace.auto_created' | 'member.auto_joined';
 }
 
 export interface CreateWorkspaceInput {
@@ -124,6 +128,13 @@ export interface WorkspaceDoctorReport {
   foreignKeyViolations: number;
   members: WorkspaceMember[];
   warnings: string[];
+}
+
+export interface AutomaticWorkspaceResult {
+  workspace: RegisteredWorkspace;
+  member: WorkspaceMember;
+  created: boolean;
+  joined: boolean;
 }
 
 interface SourceIdentity {
@@ -232,6 +243,106 @@ function recordWorkspaceEvent(
        VALUES (?, ?, 'workspace', 'worktree', ?, ?, ?, ?)`,
     )
     .run(createId('event'), kind, worktreeId, JSON.stringify(payload), now, worktreeId);
+}
+
+function recordAutomaticWorkspaceEvent(
+  database: DatabaseType,
+  input: {
+    id: string;
+    kind: 'workspace.auto_created' | 'member.auto_joined';
+    entityType: 'workspace' | 'worktree';
+    entityId: string;
+    worktreeId: string;
+    payload: Record<string, unknown>;
+  },
+  now: number,
+): void {
+  database
+    .prepare(
+      `INSERT INTO events
+        (id, kind, actor, entity_type, entity_id, payload_json, created_at, worktree_id)
+       VALUES (?, ?, 'workspace', ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
+    )
+    .run(
+      input.id,
+      input.kind,
+      input.entityType,
+      input.entityId,
+      JSON.stringify(input.payload),
+      now,
+      input.worktreeId,
+    );
+}
+
+function recordAutomaticImportEvent(
+  database: DatabaseType,
+  kind: 'workspace.auto_created' | 'member.auto_joined' | undefined,
+  member: DatabaseMemberContext,
+  now: number,
+): void {
+  if (!kind) return;
+  const workspaceEvent = kind === 'workspace.auto_created';
+  recordAutomaticWorkspaceEvent(
+    database,
+    {
+      id: workspaceEvent
+        ? `event_workspace_auto_created_${member.workspaceId}`
+        : `event_member_auto_joined_${member.worktreeId}`,
+      kind,
+      entityType: workspaceEvent ? 'workspace' : 'worktree',
+      entityId: workspaceEvent ? member.workspaceId : member.worktreeId,
+      worktreeId: member.worktreeId,
+      payload: workspaceEvent
+        ? { workspace: member.workspaceName }
+        : { member: member.worktreeName },
+    },
+    now,
+  );
+}
+
+function automaticBaseName(root: string, fallback: string): string {
+  const basename = [...path.basename(root).replace(/^\.+/u, '')].slice(0, 100).join('').trim();
+  return basename || fallback;
+}
+
+function deduplicateName(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) return base;
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const ending = `-${suffix}`;
+    const candidate = `${[...base].slice(0, 100 - ending.length).join('')}${ending}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  throw new SameTreeError('WORKSPACE_ERROR', `Could not allocate a unique name from '${base}'.`);
+}
+
+function preflightAutomaticImport(
+  primary: RepositoryContext,
+  observed: RepositoryContext,
+  now: number,
+): void {
+  inspectStandaloneSessions(observed, now);
+  const target = openDatabase(primary, { now });
+  const source = openDatabase(observed, { now });
+  try {
+    assertNoEntityCollisions(source, target);
+  } finally {
+    source.close();
+    target.close();
+  }
+}
+
+function closeStandaloneSessions(repository: RepositoryContext, now: number): void {
+  const database = openExistingDatabase(repository.databasePath);
+  try {
+    immediateTransaction(database, () => {
+      database
+        .prepare("UPDATE sessions SET status = 'closed', expires_at = ? WHERE status = 'active'")
+        .run(now);
+    });
+  } finally {
+    database.close();
+  }
 }
 
 function retireMember(
@@ -474,6 +585,7 @@ function copyStandaloneState(
   identity: SourceIdentity,
   member: DatabaseMemberContext,
   now: number,
+  automaticEventKind?: 'workspace.auto_created' | 'member.auto_joined',
 ): boolean {
   target.exec(WORKSPACE_SOURCE_SCHEMA);
   const recorded = target
@@ -492,6 +604,9 @@ function copyStandaloneState(
         },
       );
     }
+    immediateTransaction(target, () => {
+      recordAutomaticImportEvent(target, automaticEventKind, member, now);
+    });
     return false;
   }
 
@@ -716,6 +831,7 @@ function copyStandaloneState(
          VALUES (?, ?, ?, 'import-current', ?)`,
       )
       .run(member.worktreeId, source.name, identity.workspaceId, now);
+    recordAutomaticImportEvent(target, automaticEventKind, member, now);
   });
   return true;
 }
@@ -1053,7 +1169,14 @@ function joinWorkspace(
           now,
         });
         const imported = source
-          ? copyStandaloneState(source, target, identity as SourceIdentity, member, now)
+          ? copyStandaloneState(
+              source,
+              target,
+              identity as SourceIdentity,
+              member,
+              now,
+              options.automaticEventKind,
+            )
           : false;
         if (!source) recordFreshSource(target, member, repository.databasePath, now);
         sourceRecorded = true;
@@ -1118,7 +1241,9 @@ export function createWorkspace(
   assertJoinMode(input.mode);
   const workspaceName = validateWorkspaceName(input.name);
   const repository = resolveRepository(cwd);
-  const releaseWorktreeLock = acquireWorkspaceOperationLock(repository, 2_500);
+  const releaseWorktreeLock = options.worktreeLockHeld
+    ? undefined
+    : acquireWorkspaceOperationLock(repository, 2_500);
   let releaseRegistryLock: (() => void) | undefined;
   try {
     const pendingCreation = readPendingWorkspaceCreation(repository);
@@ -1195,7 +1320,7 @@ export function createWorkspace(
     return result;
   } finally {
     releaseRegistryLock?.();
-    releaseWorktreeLock();
+    releaseWorktreeLock?.();
   }
 }
 
@@ -1275,7 +1400,164 @@ export function addWorkspaceMember(
       `Workspace '${input.workspaceId}' is not registered.`,
     );
   }
-  return joinWorkspace(repository, workspace, input.memberName, input.mode, options);
+  return joinWorkspace(repository, workspace, input.memberName, input.mode, options, {
+    ...(options.worktreeLockHeld ? { worktree: true } : {}),
+  });
+}
+
+export function ensureAutomaticWorkspace(
+  primaryCwd: string,
+  observedCwd: string,
+  options: WorkspaceServiceOptions = {},
+): AutomaticWorkspaceResult | null {
+  const primary = resolveRepository(primaryCwd);
+  const observed = resolveRepository(observedCwd);
+  if (primary.privateGitDirectory === observed.privateGitDirectory) return null;
+  if (
+    !loadConfig(primary.root).autoWorkspaceEnrollment ||
+    !loadConfig(observed.root).autoWorkspaceEnrollment
+  ) {
+    return null;
+  }
+
+  const releaseAutomaticLock = acquireAutomaticWorkspaceOperationLock(options, 10_000);
+  const releaseWorktreeLocks: Array<() => void> = [];
+  try {
+    for (const privateGitDirectory of [
+      ...new Set([primary.privateGitDirectory, observed.privateGitDirectory]),
+    ].sort()) {
+      releaseWorktreeLocks.push(acquireWorkspaceOperationLockAt(privateGitDirectory, 10_000));
+    }
+    const primaryBinding = resolveWorkspaceBinding(primary, options);
+    const observedBinding = resolveWorkspaceBinding(observed, options);
+    const primaryPendingCreation = readPendingWorkspaceCreation(primary);
+    const primaryRepositoryBinding = resolveRepositoryWorkspaceBinding(primary);
+    if (primaryRepositoryBinding && !primaryBinding) {
+      throw new SameTreeError(
+        'WORKSPACE_ERROR',
+        'Primary worktree repository is already assigned to a workspace.',
+        {
+          assignedWorkspaceId: primaryRepositoryBinding.workspaceId,
+          primaryRoot: primary.root,
+        },
+      );
+    }
+    const primaryPendingJoin = readPendingWorkspaceJoin(primary);
+    if (
+      primaryPendingJoin &&
+      !primaryBinding &&
+      findRegisteredWorkspace(primaryPendingJoin.workspaceId, options) &&
+      primaryPendingJoin.workspaceId !== primaryPendingCreation?.workspaceId
+    ) {
+      throw new SameTreeError(
+        'WORKSPACE_ERROR',
+        'Primary worktree has a pending join to another workspace.',
+        { pending: primaryPendingJoin, primaryRoot: primary.root },
+      );
+    }
+    const observedRepositoryBinding = resolveRepositoryWorkspaceBinding(observed);
+    if (
+      observedRepositoryBinding &&
+      (!primaryBinding || observedRepositoryBinding.workspaceId !== primaryBinding.workspace.id)
+    ) {
+      throw new SameTreeError(
+        'WORKSPACE_ERROR',
+        'Observed repository is already bound to a different workspace.',
+        {
+          assignedWorkspaceId: observedRepositoryBinding.workspaceId,
+          observedRoot: observed.root,
+        },
+      );
+    }
+    const initialPendingJoin = readPendingWorkspaceJoin(observed);
+    if (
+      initialPendingJoin &&
+      findRegisteredWorkspace(initialPendingJoin.workspaceId, options) &&
+      (!primaryBinding || initialPendingJoin.workspaceId !== primaryBinding.workspace.id)
+    ) {
+      throw new SameTreeError(
+        'WORKSPACE_ERROR',
+        'Observed repository has a pending join to a different workspace.',
+        { observedRoot: observed.root, pending: initialPendingJoin },
+      );
+    }
+    if (observedBinding) {
+      if (!primaryBinding || primaryBinding.workspace.id !== observedBinding.workspace.id) {
+        throw new SameTreeError(
+          'WORKSPACE_ERROR',
+          'Observed repository is already bound to a different workspace.',
+          { assignedWorkspaceId: observedBinding.workspace.id, observedRoot: observed.root },
+        );
+      }
+      assertWorkspaceBindingReady(observed, observedBinding);
+      return null;
+    }
+
+    const now = options.now ?? Date.now();
+    let workspace: RegisteredWorkspace;
+    let created = false;
+    if (primaryBinding) {
+      assertWorkspaceBindingReady(primary, primaryBinding);
+      workspace = primaryBinding.workspace;
+      inspectStandaloneSessions(observed, now);
+    } else {
+      preflightAutomaticImport(primary, observed, now);
+      const pendingCreation = primaryPendingCreation;
+      if (pendingCreation && pendingCreation.mode !== 'import-current') {
+        throw new SameTreeError(
+          'WORKSPACE_ERROR',
+          'A manual workspace creation is pending with another state mode.',
+          { pending: pendingCreation },
+        );
+      }
+      const workspaceName =
+        pendingCreation?.workspaceName ??
+        deduplicateName(
+          automaticBaseName(primary.root, 'workspace'),
+          new Set(listRegisteredWorkspaces(options).map((candidate) => candidate.name)),
+        );
+      closeStandaloneSessions(primary, now);
+      const promoted = createWorkspace(
+        primary.root,
+        {
+          name: workspaceName,
+          memberName: pendingCreation?.memberName ?? automaticBaseName(primary.root, 'member'),
+          mode: 'import-current',
+        },
+        {
+          ...options,
+          now,
+          worktreeLockHeld: true,
+          automaticEventKind: 'workspace.auto_created',
+        },
+      );
+      workspace = promoted.workspace;
+      created = true;
+    }
+
+    const pendingJoin = readPendingWorkspaceJoin(observed);
+    const memberName =
+      pendingJoin?.workspaceId === workspace.id
+        ? pendingJoin.memberName
+        : deduplicateName(
+            automaticBaseName(observed.root, 'member'),
+            new Set(workspaceMembers(primary.root, options).map((candidate) => candidate.name)),
+          );
+    const joined = addWorkspaceMember(
+      observed.root,
+      { workspaceId: workspace.id, memberName, mode: 'import-current' },
+      {
+        ...options,
+        now,
+        worktreeLockHeld: true,
+        automaticEventKind: 'member.auto_joined',
+      },
+    );
+    return { workspace, member: joined.member, created, joined: true };
+  } finally {
+    for (const release of releaseWorktreeLocks.reverse()) release();
+    releaseAutomaticLock();
+  }
 }
 
 export function workspaceStatus(

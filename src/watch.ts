@@ -124,6 +124,10 @@ function eventDescription(event: CoordinationEvent): string {
     }
     case 'message.acknowledged':
       return `${event.actor}: acknowledged a message`;
+    case 'workspace.auto_created':
+      return `${event.actor}: automatically created workspace ${text(payload.workspace) || event.entityId}`;
+    case 'member.auto_joined':
+      return `${event.actor}: automatically joined member ${text(payload.member) || event.entityId}`;
     case 'plan.published':
       return `${event.actor}: published plan "${text(payload.title) || event.entityId}" (revision ${String(payload.revision ?? '')})`;
     case 'plan.revised':

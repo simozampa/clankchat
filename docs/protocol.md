@@ -1,12 +1,16 @@
 # Coordination Protocol
 
-This document defines the coordination behavior shared by the CLI and MCP adapters, plus the CLI-only lifecycle for explicit workspaces.
+This document defines the coordination behavior shared by the CLI and MCP adapters, including automatic and explicit workspace lifecycle.
 
 ## Workspaces And Members
 
 Every database is a workspace. A standalone database is an implicit one-member workspace under Git's private worktree directory. An explicit workspace has one shared registry database and one or more named members representing local repository worktrees.
 
-Explicit workspace lifecycle is CLI/library-only:
+The same harness activity ID is recorded directly in the local workspace registry when a Coordinator session opens. If that activity ID later opens SameTree from another initialized repository, SameTree promotes the original standalone state with `import-current` and joins only the newly observed repository. It never scans sibling directories or infers membership from Git remotes. The triggering response contains the automatic workspace and member, while `workspace.auto_created` and `member.auto_joined` enter the audit stream.
+
+Automatic promotion closes active sessions in the standalone source immediately before importing it. MCP clients recover their expired session against the new shared database on their next call. A target already bound to another workspace is an error. Registry-wide serialization makes simultaneous observations of the same repository idempotent. Set `autoWorkspaceEnrollment` to `false` in either repository's `.sametree/config.json` to disable the transition.
+
+Manual lifecycle remains available through CLI and library APIs:
 
 ```bash
 sametree workspace create <name> --member <name> (--fresh | --import-current)
@@ -26,11 +30,11 @@ If creation fails before a member is recorded, retrying the exact create command
 
 `leave` and `prune` mark members unavailable while preserving their tasks, messages, sessions, and events. Archived claim rows created before 0.1.7 are also retained. Leave requires no live home-member session. Prune retires only members whose recorded Git identity is definitely stale. Relink restores a retired member only when its original private and common Git directories still match, as after `git worktree move`; it cannot attach a replacement clone.
 
-Create and add initialize missing `.sametree/` project files in the current member but do not configure harness integrations; run `sametree setup` separately where Claude Code or OpenCode will run. Other lifecycle commands do not create agent sessions. Workspace names cannot start with `.` or contain path separators. Add and relink accept an exact ID or unique workspace name; duplicate names require the ID, and path-like arguments are rejected because `--cwd` selects the joining worktree. SameTree does not create repositories, branches, or worktrees. A custom registry selected with `SAMETREE_WORKSPACE_REGISTRY` must be inherited by every CLI, MCP, adapter, and hook process.
+Create and add initialize missing `.sametree/` project files in the current member but do not configure harness integrations; run `sametree setup` separately where Claude Code or OpenCode will run. Agent-facing MCP exposes no direct lifecycle tool; automatic enrollment occurs during Coordinator startup from observed activity. Other lifecycle commands do not create agent sessions. Workspace names cannot start with `.` or contain path separators. Add and relink accept an exact ID or unique workspace name; duplicate names require the ID, and path-like arguments are rejected because `--cwd` selects the joining worktree. SameTree does not create repositories, branches, or worktrees. A custom registry selected with `SAMETREE_WORKSPACE_REGISTRY` must be inherited by every CLI, MCP, and adapter process.
 
 ## Identity and Sessions
 
-An agent name is unique within one workspace and contains letters, numbers, `.`, `_`, or `-`. MCP adapters generate a process-scoped name from the harness's native session identifier, falling back to the MCP process ID. Automatic plan publication uses the same identity when available, while plan continuity is keyed by the stable harness and harness session ID so a resumed process does not duplicate a proposal. Set `SAMETREE_AGENT` when a durable human-readable identity such as `claude-reviewer` or `opencode-1` is required, but never reuse it for independent processes in the same workspace.
+An agent name is unique within one workspace and contains letters, numbers, `.`, `_`, or `-`. MCP adapters generate a process-scoped name from the harness's native session identifier, falling back to the MCP process ID. Claude's native session ID is an automatic-workspace activity ID. OpenCode's process ID is qualified with operating-system process-start identity where available; set `SAMETREE_ACTIVITY_ID` on platforms that cannot provide it. Automatic plan publication uses the same identity when available, while plan continuity is keyed by the stable harness and harness session ID so a resumed process does not duplicate a proposal. Set `SAMETREE_AGENT` when a durable human-readable identity such as `claude-reviewer` or `opencode-1` is required, but never reuse it for independent processes in the same workspace.
 
 A session represents one Coordinator-backed process lifetime and has one home member. It records the home member's starting branch and HEAD descriptor. Coordination CLI commands, MCP servers, watchers, message followers, and plan publishers create sessions; setup, workspace lifecycle, and diagnostics do not. Built-in sessions remain in the session table for lease ownership and diagnostics but omit lifecycle audit events. Library callers emit `session.started` and `session.closed` by default and may disable them. An MCP heartbeat renews:
 
@@ -106,7 +110,7 @@ The first message ID becomes its default thread ID. The reviewer sends findings 
 
 Review messages remain non-authoritative peer context. They do not assign review work, expand implementation scope, or transfer task ownership. The user must assign each agent's scope directly. Harness followers deliver addressed review messages to active Claude Code and OpenCode sessions; inbox state remains durable when an agent is offline.
 
-SameTree does not reserve files, reject overlapping edits, or infer path ownership. Agents must preserve concurrent changes they did not create. When likely edits overlap, serialize writers through messages or use separate worktrees. The worktree guard prevents recognized operations from escaping the harness's launch worktree, but it is not a filesystem lock or operating-system sandbox.
+SameTree does not reserve files, reject overlapping edits, infer path ownership, or restrict filesystem and tool access. Agents retain whatever access their harness and operating-system account provide, whether or not a path belongs to a workspace member. They must preserve concurrent changes they did not create and serialize likely overlapping writers through messages.
 
 Databases upgraded from releases before 0.1.7 retain `path_claims` and historical claim events as archival data. Current CLI and MCP claim tools do not exist. Deprecated library acquisition throws `INVALID_INPUT`; listing returns `[]`; release returns `{ released: 0 }`; and lease recovery reports `claims: 0`.
 
