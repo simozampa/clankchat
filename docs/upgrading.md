@@ -2,6 +2,12 @@
 
 SameTree is pre-1.0 alpha software. Back up coordination state before upgrades and do not mix versions against the same database.
 
+## Upgrade To 0.1.9
+
+Version 0.1.9 makes the globally enabled Claude Code inbox monitor exit quietly in Git repositories where SameTree has not been initialized. It no longer reports a failed monitor at startup merely because `.sametree/config.json` is absent.
+
+Install `npm install --global sametree@0.1.9 --force`, run `claude plugin marketplace update sametree` followed by `claude plugin update sametree@sametree`, and restart Claude Code. No database or configuration migration is required.
+
 ## Upgrade To 0.1.8
 
 Version 0.1.8 removes SameTree's worktree guards and adds automatic multi-repository workspaces. SameTree no longer inspects or blocks tool calls based on paths, working directories, repository membership, shell commands, or Git subcommands. Workspace membership scopes shared coordination state only and does not control filesystem access.

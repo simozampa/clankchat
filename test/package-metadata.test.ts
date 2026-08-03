@@ -1,4 +1,14 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -21,5 +31,63 @@ describe('package metadata', () => {
       expect.objectContaining({ matcher: 'ExitPlanMode' }),
     ]);
     expect(existsSync(path.resolve('plugins/sametree/hooks/guard-worktree.mjs'))).toBe(false);
+  });
+
+  it('runs the Claude inbox monitor only in an initialized SameTree project', () => {
+    const project = mkdtempSync(path.join(tmpdir(), 'sametree-claude-monitor-'));
+    try {
+      const initialized = spawnSync('git', ['init', '--quiet', project]);
+      expect(initialized.status).toBe(0);
+
+      const result = spawnSync('sh', [path.resolve('plugins/sametree/bin/inbox-monitor.sh')], {
+        cwd: project,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          CLAUDE_CODE_SESSION_ID: 'test-session',
+          CLAUDE_PROJECT_DIR: project,
+          SAMETREE_BIN: path.join(project, 'missing-sametree'),
+        },
+      });
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe('');
+      expect(result.stderr).toBe('');
+
+      mkdirSync(path.join(project, '.sametree'));
+      writeFileSync(path.join(project, '.sametree', 'config.json'), '{}\n');
+      const executable = path.join(project, 'sametree');
+      writeFileSync(executable, '#!/bin/sh\nprintf \'%s\\n\' "$@"\n');
+      chmodSync(executable, 0o755);
+
+      const followed = spawnSync('sh', [path.resolve('plugins/sametree/bin/inbox-monitor.sh')], {
+        cwd: project,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          CLAUDE_CODE_SESSION_ID: 'test-session',
+          CLAUDE_PROJECT_DIR: project,
+          SAMETREE_BIN: executable,
+        },
+      });
+
+      expect(followed.status).toBe(0);
+      expect(followed.stderr).toBe('');
+      expect(followed.stdout.replace(/\n$/u, '').split('\n')).toEqual([
+        '--cwd',
+        project,
+        '--agent',
+        'claude-code-test-session',
+        '--harness',
+        'claude-code',
+        'message',
+        'follow',
+        '--json',
+        '--prefix',
+        'SameTree message: ',
+      ]);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
   });
 });
