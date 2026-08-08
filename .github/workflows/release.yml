@@ -36,5 +36,16 @@ jobs:
       - name: Run checks
         run: npm run check
 
+      - name: Check registry
+        id: registry
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if npm view "clankchat@${version}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish package
+        if: steps.registry.outputs.published != 'true'
         run: npm publish --access public --tag latest
