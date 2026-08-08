@@ -1,24 +1,22 @@
 {
-  "name": "sametree",
-  "version": "0.1.9",
-  "description": "Local task and review coordination for coding agents",
+  "name": "clankchat",
+  "version": "0.1.0",
+  "description": "comms for your coding agents",
   "keywords": [
     "agent",
     "agents",
+    "comms",
     "claude-code",
-    "coordination",
+    "opencode",
     "mcp",
     "mcp-server",
-    "multi-agent",
-    "opencode",
-    "sqlite",
-    "workspace"
+    "multi-agent"
   ],
-  "homepage": "https://github.com/simozampa/sametree#readme",
-  "bugs": "https://github.com/simozampa/sametree/issues",
+  "homepage": "https://github.com/simozampa/clankchat#readme",
+  "bugs": "https://github.com/simozampa/clankchat/issues",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/simozampa/sametree.git"
+    "url": "git+https://github.com/simozampa/clankchat.git"
   },
   "license": "MIT",
   "author": "Simone Zamparini",
@@ -26,7 +24,6 @@
   "files": [
     "dist",
     "docs",
-    "examples",
     "scripts",
     ".claude-plugin",
     "plugins",
@@ -37,8 +34,8 @@
     "SECURITY.md"
   ],
   "bin": {
-    "sametree": "dist/cli.js",
-    "sametree-mcp": "dist/mcp.js"
+    "clankchat": "dist/cli.js",
+    "clankchat-mcp": "dist/mcp.js"
   },
   "exports": {
     ".": {
@@ -62,14 +59,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "better-sqlite3": "^12.11.1",
     "commander": "^15.0.0",
     "jsonc-parser": "^3.3.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.4",
+    "@biomejs/biome": "^2.5.7",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.20.0",
     "typescript": "^7.0.2",

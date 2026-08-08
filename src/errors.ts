@@ -1,63 +1,53 @@
 export type ErrorCode =
-  | 'AGENT_REQUIRED'
-  | 'CLAIM_CONFLICT'
-  | 'DATABASE_ERROR'
-  | 'GIT_STATUS_ERROR'
-  | 'HANDOFF_CONFLICT'
-  | 'HOOK_REFUSED'
-  | 'INSTRUCTION_CONFLICT'
-  | 'INVALID_INPUT'
-  | 'NOT_ASSIGNED'
-  | 'NOT_FOUND'
   | 'NOT_GIT_REPOSITORY'
-  | 'POLICY_NOT_FOUND'
-  | 'PLAN_CONFLICT'
-  | 'TASK_BLOCKED'
-  | 'TASK_UNAVAILABLE'
-  | 'USER_AUTHORIZATION_REQUIRED'
-  | 'WORKSPACE_ERROR';
+  | 'INVALID_INPUT'
+  | 'AGENT_NOT_FOUND'
+  | 'MESSAGE_NOT_FOUND'
+  | 'MESSAGE_CONFLICT'
+  | 'REPLY_NOT_ALLOWED'
+  | 'REPLY_EXISTS'
+  | 'REPLY_TIMEOUT'
+  | 'REQUEST_CANCELLED'
+  | 'SESSION_EXPIRED'
+  | 'DATABASE_BUSY'
+  | 'DATABASE_ERROR'
+  | 'SETUP_ERROR';
 
-/** An expected domain failure that adapters can render without a stack trace. */
-export class SameTreeError extends Error {
+/** An expected product failure that adapters can render without a stack trace. */
+export class ClankChatError extends Error {
   readonly code: ErrorCode;
   readonly details: Record<string, unknown>;
 
   constructor(code: ErrorCode, message: string, details: Record<string, unknown> = {}) {
     super(message);
-    this.name = 'SameTreeError';
+    this.name = 'ClankChatError';
     this.code = code;
     this.details = details;
   }
 }
 
-export function isSameTreeError(error: unknown): error is SameTreeError {
-  return error instanceof SameTreeError;
+export function isClankChatError(error: unknown): error is ClankChatError {
+  return error instanceof ClankChatError;
 }
 
 export function errorResult(error: unknown): {
   error: { code: string; details: Record<string, unknown>; message: string };
   ok: false;
 } {
-  if (isSameTreeError(error)) {
+  if (isClankChatError(error)) {
     return {
       ok: false,
       error: { code: error.code, message: error.message, details: error.details },
     };
   }
 
-  const sqliteCode = error instanceof Error ? Reflect.get(error, 'code') : undefined;
-  if (
-    typeof sqliteCode === 'string' &&
-    (sqliteCode === 'SQLITE_BUSY' ||
-      sqliteCode.startsWith('SQLITE_BUSY_') ||
-      sqliteCode === 'SQLITE_LOCKED' ||
-      sqliteCode.startsWith('SQLITE_LOCKED_'))
-  ) {
+  const sqliteCode = error instanceof Error ? String(Reflect.get(error, 'code') ?? '') : '';
+  if (sqliteCode.includes('BUSY') || sqliteCode.includes('LOCKED')) {
     return {
       ok: false,
       error: {
-        code: 'DATABASE_ERROR',
-        message: 'SameTree database remained locked while waiting for another writer.',
+        code: 'DATABASE_BUSY',
+        message: 'The clankchat line remained locked while waiting for another writer.',
         details: { cause: error instanceof Error ? error.message : String(error) },
       },
     };
@@ -66,7 +56,7 @@ export function errorResult(error: unknown): {
   return {
     ok: false,
     error: {
-      code: 'INTERNAL_ERROR',
+      code: 'DATABASE_ERROR',
       message: error instanceof Error ? error.message : String(error),
       details: {},
     },

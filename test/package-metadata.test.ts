@@ -1,93 +1,57 @@
-import { spawnSync } from 'node:child_process';
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-function json(relativePath: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(path.resolve(relativePath), 'utf8')) as Record<string, unknown>;
+function json(relative: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path.resolve(relative), 'utf8')) as Record<string, unknown>;
 }
 
 describe('package metadata', () => {
-  it('keeps the Claude plugin version aligned without duplicate hook registration', () => {
-    const packageMetadata = json('package.json');
-    const plugin = json('plugins/sametree/.claude-plugin/plugin.json');
-    const hooks = json('plugins/sametree/hooks/hooks.json');
-
-    expect(plugin.version).toBe(packageMetadata.version);
-    expect(plugin).not.toHaveProperty('hooks');
-    expect(hooks).toHaveProperty('hooks');
-    expect(JSON.stringify(hooks)).not.toContain('guard-worktree');
-    expect((hooks.hooks as { PreToolUse: Array<{ matcher?: string }> }).PreToolUse).toEqual([
-      expect.objectContaining({ matcher: 'ExitPlanMode' }),
+  it('aligns the package and Claude plugin', () => {
+    const metadata = json('package.json');
+    const plugin = json('plugins/clankchat/.claude-plugin/plugin.json');
+    expect(metadata).toMatchObject({
+      name: 'clankchat',
+      version: '0.1.0',
+      description: 'comms for your coding agents',
+      bin: { clankchat: 'dist/cli.js', 'clankchat-mcp': 'dist/mcp.js' },
+    });
+    expect(plugin.version).toBe(metadata.version);
+    expect(metadata.keywords).toEqual([
+      'agent',
+      'agents',
+      'comms',
+      'claude-code',
+      'opencode',
+      'mcp',
+      'mcp-server',
+      'multi-agent',
     ]);
-    expect(existsSync(path.resolve('plugins/sametree/hooks/guard-worktree.mjs'))).toBe(false);
   });
 
-  it('runs the Claude inbox monitor only in an initialized SameTree project', () => {
-    const project = mkdtempSync(path.join(tmpdir(), 'sametree-claude-monitor-'));
-    try {
-      const initialized = spawnSync('git', ['init', '--quiet', project]);
-      expect(initialized.status).toBe(0);
+  it('exposes exactly seven MCP tools', () => {
+    const source = readFileSync('src/mcp-server.ts', 'utf8');
+    const tools = [...source.matchAll(/server\.registerTool\(\s*'([^']+)'/gu)].map(
+      (match) => match[1],
+    );
+    expect(tools).toEqual([
+      'clankchat_send',
+      'clankchat_reply',
+      'clankchat_inbox',
+      'clankchat_ack',
+      'clankchat_agents',
+      'clankchat_status',
+      'clankchat_heartbeat',
+    ]);
+  });
 
-      const result = spawnSync('sh', [path.resolve('plugins/sametree/bin/inbox-monitor.sh')], {
-        cwd: project,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          CLAUDE_CODE_SESSION_ID: 'test-session',
-          CLAUDE_PROJECT_DIR: project,
-          SAMETREE_BIN: path.join(project, 'missing-sametree'),
-        },
-      });
-
-      expect(result.status).toBe(0);
-      expect(result.stdout).toBe('');
-      expect(result.stderr).toBe('');
-
-      mkdirSync(path.join(project, '.sametree'));
-      writeFileSync(path.join(project, '.sametree', 'config.json'), '{}\n');
-      const executable = path.join(project, 'sametree');
-      writeFileSync(executable, '#!/bin/sh\nprintf \'%s\\n\' "$@"\n');
-      chmodSync(executable, 0o755);
-
-      const followed = spawnSync('sh', [path.resolve('plugins/sametree/bin/inbox-monitor.sh')], {
-        cwd: project,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          CLAUDE_CODE_SESSION_ID: 'test-session',
-          CLAUDE_PROJECT_DIR: project,
-          SAMETREE_BIN: executable,
-        },
-      });
-
-      expect(followed.status).toBe(0);
-      expect(followed.stderr).toBe('');
-      expect(followed.stdout.replace(/\n$/u, '').split('\n')).toEqual([
-        '--cwd',
-        project,
-        '--agent',
-        'claude-code-test-session',
-        '--harness',
-        'claude-code',
-        'message',
-        'follow',
-        '--json',
-        '--prefix',
-        'SameTree message: ',
-      ]);
-    } finally {
-      rmSync(project, { recursive: true, force: true });
-    }
+  it('keeps production source under five thousand lines', () => {
+    const files = readdirSync('src').filter((file) => file.endsWith('.ts'));
+    const lines = files.reduce(
+      (total, file) => total + readFileSync(path.join('src', file), 'utf8').split('\n').length,
+      0,
+    );
+    expect(lines).toBeLessThan(5_000);
   });
 });

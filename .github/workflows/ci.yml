@@ -40,4 +40,13 @@ jobs:
         run: |
           archive="$(npm pack --silent)"
           npm install --global "./${archive}"
-          sametree --version
+          clankchat --version
+          repository="$(mktemp -d)"
+          home="$(mktemp -d)"
+          git -C "$repository" init
+          HOME="$home" clankchat --cwd "$repository" setup --opencode
+          request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
+          response="$(printf '%s\n' "$request" | CLANKCHAT_CWD="$repository" CLANKCHAT_AGENT=ci-agent timeout 10 clankchat-mcp)"
+          node -e 'const value=JSON.parse(process.argv[1]); if (value.result?.serverInfo?.name !== "clankchat") process.exit(1)' "$response"
+          lines="$(wc -l src/*.ts | tail -n 1 | tr -s ' ' | cut -d ' ' -f 2)"
+          test "$lines" -lt 5000

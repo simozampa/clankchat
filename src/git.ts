@@ -1,30 +1,16 @@
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import path from 'node:path';
 
-import { SameTreeError } from './errors.js';
-import type { GitWorktreeContext } from './types.js';
+import { ClankChatError } from './errors.js';
 
 export interface RepositoryContext {
   root: string;
   commonGitDirectory: string;
   privateGitDirectory: string;
   linkedWorktree: boolean;
-  head: GitHeadContext;
   databasePath: string;
-  hooksPath: string;
-  ignoreCase: boolean;
 }
-
-export interface GitHeadContext {
-  descriptor: string;
-  reference: string | null;
-  branch: string | null;
-  detached: boolean;
-}
-
-const GIT_STATUS_TIMEOUT_MS = 15_000;
-const GIT_STATUS_MAX_BUFFER = 16 * 1024 * 1024;
 
 function git(cwd: string, args: string[]): string {
   try {
@@ -34,18 +20,19 @@ function git(cwd: string, args: string[]): string {
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
   } catch (error) {
-    throw new SameTreeError('NOT_GIT_REPOSITORY', 'SameTree must run inside a Git working tree.', {
-      cwd,
-      cause: error instanceof Error ? error.message : String(error),
-    });
+    throw new ClankChatError(
+      'NOT_GIT_REPOSITORY',
+      'clankchat must run inside a Git working tree.',
+      { cwd, cause: error instanceof Error ? error.message : String(error) },
+    );
   }
 }
 
 export function resolveRepository(cwd = process.cwd()): RepositoryContext {
   if (git(cwd, ['rev-parse', '--is-bare-repository']) === 'true') {
-    throw new SameTreeError(
+    throw new ClankChatError(
       'NOT_GIT_REPOSITORY',
-      'Bare repositories do not have a shared working tree.',
+      'Bare repositories do not have an agent chat line.',
     );
   }
 
@@ -54,176 +41,11 @@ export function resolveRepository(cwd = process.cwd()): RepositoryContext {
     git(root, ['rev-parse', '--path-format=absolute', '--git-common-dir']),
   );
   const privateGitDirectory = realpathSync(git(root, ['rev-parse', '--absolute-git-dir']));
-  const databasePath = path.join(privateGitDirectory, 'sametree', 'state.sqlite3');
-  const configuredHooksPath = gitConfig(root, 'core.hooksPath', 'path');
-  const hooksPath = configuredHooksPath
-    ? path.resolve(root, configuredHooksPath)
-    : path.resolve(git(root, ['rev-parse', '--path-format=absolute', '--git-path', 'hooks']));
-
   return {
     root,
     commonGitDirectory,
     privateGitDirectory,
     linkedWorktree: privateGitDirectory !== commonGitDirectory,
-    head: readGitHeadContext(privateGitDirectory),
-    databasePath,
-    hooksPath,
-    ignoreCase: gitConfig(root, 'core.ignorecase', 'bool') === 'true',
+    databasePath: path.join(commonGitDirectory, 'clankchat', 'state.sqlite3'),
   };
-}
-
-export function readGitHeadContext(privateGitDirectory: string): GitHeadContext {
-  const headPath = path.join(privateGitDirectory, 'HEAD');
-  let descriptor: string;
-  try {
-    descriptor = readFileSync(headPath, 'utf8').trim();
-  } catch (error) {
-    throw new SameTreeError('GIT_STATUS_ERROR', 'Could not read the private Git HEAD descriptor.', {
-      headPath,
-      cause: error instanceof Error ? error.message : String(error),
-    });
-  }
-
-  if (!descriptor || descriptor.includes('\n')) {
-    throw new SameTreeError('GIT_STATUS_ERROR', 'Git reported an invalid HEAD descriptor.', {
-      headPath,
-    });
-  }
-
-  const symbolicPrefix = 'ref: ';
-  const reference = descriptor.startsWith(symbolicPrefix)
-    ? descriptor.slice(symbolicPrefix.length)
-    : null;
-  if (reference === '') {
-    throw new SameTreeError('GIT_STATUS_ERROR', 'Git reported an empty symbolic HEAD reference.', {
-      headPath,
-    });
-  }
-
-  return {
-    descriptor,
-    reference,
-    branch:
-      reference === null
-        ? null
-        : reference.startsWith('refs/heads/')
-          ? reference.slice('refs/heads/'.length)
-          : reference,
-    detached: reference === null,
-  };
-}
-
-export function gitConfig(cwd: string, key: string, type?: 'bool' | 'path'): string | null {
-  try {
-    const value = execFileSync('git', ['config', ...(type ? [`--${type}`] : []), '--get', key], {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    return value || null;
-  } catch {
-    return null;
-  }
-}
-
-export function readGitWorktreeContext(
-  repositoryRoot: string,
-  privateGitDirectory = realpathSync(git(repositoryRoot, ['rev-parse', '--absolute-git-dir'])),
-): GitWorktreeContext {
-  let output: string;
-  try {
-    output = execFileSync(
-      'git',
-      [
-        '--no-optional-locks',
-        'status',
-        '--porcelain=v2',
-        '--branch',
-        '--no-ahead-behind',
-        '--untracked-files=normal',
-        '--ignore-submodules=none',
-      ],
-      {
-        cwd: repositoryRoot,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: GIT_STATUS_TIMEOUT_MS,
-        maxBuffer: GIT_STATUS_MAX_BUFFER,
-      },
-    ).trim();
-  } catch (error) {
-    throw new SameTreeError('GIT_STATUS_ERROR', 'Could not inspect live Git worktree state.', {
-      cause: error instanceof Error ? error.message : String(error),
-    });
-  }
-  const lines = output.split('\n');
-  const oidPrefix = '# branch.oid ';
-  const oid = lines.find((line) => line.startsWith(oidPrefix))?.slice(oidPrefix.length);
-  if (!oid) {
-    throw new SameTreeError('GIT_STATUS_ERROR', 'Git did not report worktree HEAD state.');
-  }
-  const head = readGitHeadContext(privateGitDirectory);
-  return {
-    root: realpathSync(repositoryRoot),
-    branch: head.branch,
-    commit: oid === '(initial)' ? null : oid,
-    detached: head.detached,
-    dirty: lines.some((line) => line.length > 0 && !line.startsWith('# ')),
-  };
-}
-
-export function stagedFiles(repositoryRoot: string): string[] {
-  const output = execFileSync(
-    'git',
-    ['diff', '--cached', '--name-status', '-z', '--diff-filter=ACDMRTUXB'],
-    {
-      cwd: repositoryRoot,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  );
-
-  const tokens = output.split('\0');
-  const files: string[] = [];
-  for (let index = 0; index < tokens.length; ) {
-    const token = tokens[index++];
-    if (!token) continue;
-
-    const tab = token.indexOf('\t');
-    const status = tab === -1 ? token : token.slice(0, tab);
-    const firstPath = tab === -1 ? tokens[index++] : token.slice(tab + 1);
-    if (firstPath) files.push(firstPath);
-
-    if (status.startsWith('R') || status.startsWith('C')) {
-      const secondPath = tokens[index++];
-      if (secondPath) files.push(secondPath);
-    }
-  }
-  return [...new Set(files)];
-}
-
-export function stagedChangedLines(repositoryRoot: string): number {
-  const output = execFileSync('git', ['diff', '--cached', '--numstat', '-z'], {
-    cwd: repositoryRoot,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  let total = 0;
-  const tokens = output.split('\0');
-  for (let index = 0; index < tokens.length; ) {
-    const entry = tokens[index++];
-    if (!entry) continue;
-    const [added, removed, file] = entry.split('\t');
-    const additions = added === '-' ? 0 : Number(added);
-    const deletions = removed === '-' ? 0 : Number(removed);
-    if (!Number.isFinite(additions) || !Number.isFinite(deletions)) {
-      throw new SameTreeError('HOOK_REFUSED', 'Git returned an invalid staged diff summary.');
-    }
-    total += additions + deletions;
-
-    // With -z, renamed files use an empty path followed by old and new path fields.
-    if (file === '') index += 2;
-  }
-  return total;
 }

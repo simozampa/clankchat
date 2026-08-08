@@ -1,37 +1,25 @@
-# Security Policy
+# Security
 
-## Supported Versions
+## Reporting
 
-SameTree is currently alpha software. Security fixes are applied to the latest release and the `main` branch.
+Report vulnerabilities through [GitHub private vulnerability reporting](https://github.com/simozampa/clankchat/security/advisories/new). Do not include secrets or private repository data in a public issue.
 
-## Reporting a Vulnerability
+## Trust Model
 
-Please use [GitHub private vulnerability reporting](https://github.com/simozampa/sametree/security/advisories/new). Do not open a public issue for an undisclosed vulnerability.
+clankchat is for trusted processes running as one operating-system user on one machine. It is not an authentication boundary or sandbox.
 
-Include the affected version, operating system, reproduction steps, impact, and any suggested mitigation. You can expect an initial response within seven days.
+Any process with access to the repository's Git common directory can read or alter the SQLite database. Agent names are cooperative identities. A process can invoke the CLI directly, forge a name, or modify generated integration files.
 
-## Security Boundaries
+Peer messages never grant harness permissions. Claude Code and OpenCode apply their own command, filesystem, and network controls when reacting to a message.
 
-SameTree protects its own state against malformed inputs and conflicting transactional updates. It is not a sandbox or authorization system.
+## Data
 
-SameTree does not authorize or preflight harness tool calls. It never blocks access based on a path, working directory, repository or workspace membership, shell command, or Git subcommand. Workspace membership selects shared coordination state only. Filesystem and process access remain controlled by the harness, operating-system account, and any external sandbox.
+Messages and event bodies are stored unencrypted at `<git-common-dir>/clankchat/state.sqlite3`. Do not send secrets that should not be visible to every trusted process with local repository access.
 
-The obsolete 0.1.x guard files and CLI command are removed. Users upgrading from 0.1.6 or 0.1.7 must rerun `sametree setup` so exact stale SameTree hook handlers are removed before harnesses restart.
+Keep the database on a local filesystem. Network and cloud-synchronized filesystems can violate SQLite locking assumptions and are unsupported.
 
-SameTree cannot inspect or constrain the behavior of an executable, script, package lifecycle command, compiler plugin, or child process. Use operating-system sandboxing when commands themselves are not trusted.
+## Integrations
 
-Processes running as the same operating-system user can:
+Prompt capture and live delivery fail open. An integration error may delay or duplicate a message, but it must never block normal harness operation. OpenCode uses stable delivery metadata to reduce duplicates across retries. A process crash at a transport boundary can still make universal exactly-once model observation impossible.
 
-- Write source files regardless of SameTree task or message state.
-- Read or modify the local SameTree database.
-- Impersonate another agent name.
-- Bypass Git hooks with `--no-verify`.
-- Modify repository policy and hook files.
-- Read and write any path their harness and operating-system account permit.
-- Invoke shared-instruction CLI/library APIs with `userAuthorized: true` or modify harness capture plugins.
-
-Do not use SameTree to coordinate mutually hostile agents. Use separate operating-system accounts, containers, or worktrees when isolation is required.
-
-The exact `For all agents:` prefix prevents accidental capture of ordinary prompts by the shipped Claude Code and OpenCode adapters. It is a cooperative authorization signal, not proof of user identity. Agent-facing MCP exposes only instruction reads and per-agent acknowledgements, but a process with the same operating-system access can still forge the prefix, call the CLI or library directly, read stored instruction text, or alter local delivery state.
-
-Keep the SQLite database on a local filesystem. Network filesystems and file-sync services can violate SQLite locking assumptions and are unsupported.
+Setup refuses symlinked generated paths and preserves unrelated JSONC configuration while removing exact stale branded entries.
