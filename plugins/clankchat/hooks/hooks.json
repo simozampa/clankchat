@@ -1,0 +1,18 @@
+{
+  "description": "Pin explicit human broadcasts on the repository line.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/capture-pinned.mjs"],
+            "timeout": 5,
+            "statusMessage": "Pinning broadcast in clankchat"
+          }
+        ]
+      }
+    ]
+  }
+}

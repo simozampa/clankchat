@@ -1,240 +1,78 @@
-# Coordination Protocol
+# clankchat Protocol
 
-This document defines the coordination behavior shared by the CLI and MCP adapters, including automatic and explicit workspace lifecycle.
+## Repository Line
 
-## Workspaces And Members
-
-Every database is a workspace. A standalone database is an implicit one-member workspace under Git's private worktree directory. An explicit workspace has one shared registry database and one or more named members representing local repository worktrees.
-
-The same harness activity ID is recorded directly in the local workspace registry when a Coordinator session opens. If that activity ID later opens SameTree from another initialized repository, SameTree promotes the original standalone state with `import-current` and joins only the newly observed repository. It never scans sibling directories or infers membership from Git remotes. The triggering response contains the automatic workspace and member, while `workspace.auto_created` and `member.auto_joined` enter the audit stream.
-
-Automatic promotion closes active sessions in the standalone source immediately before importing it. MCP clients recover their expired session against the new shared database on their next call. A target already bound to another workspace is an error. Registry-wide serialization makes simultaneous observations of the same repository idempotent. Set `autoWorkspaceEnrollment` to `false` in either repository's `.sametree/config.json` to disable the transition.
-
-Manual lifecycle remains available through CLI and library APIs:
-
-```bash
-sametree workspace create <name> --member <name> (--fresh | --import-current)
-sametree workspace cancel-create
-sametree workspace add <workspace-id-or-name> --member <name> (--fresh | --import-current)
-sametree workspace status
-sametree workspace members
-sametree workspace leave
-sametree workspace prune
-sametree workspace relink <workspace-id-or-name> --member <existing-name>
-sametree workspace doctor
-```
-
-Exactly one state mode is required. Fresh mode starts the member without copying its standalone coordination. Import mode copies current standalone rows atomically, preserves entity IDs, remaps member context, and resequences audit events. Any identity collision rejects the import. Neither mode deletes the source database or keeps it synchronized afterward.
-
-If creation fails before a member is recorded, retrying the exact create command preserves its generated identity. `workspace cancel-create` safely removes that empty pending registration so corrected name, member, or mode input can be used. A join intent preserves workspace, member, and mode across a crash after member insertion. Once a member exists, complete the exact retry and use `workspace leave` instead.
-
-`leave` and `prune` mark members unavailable while preserving their tasks, messages, sessions, and events. Archived claim rows created before 0.1.7 are also retained. Leave requires no live home-member session. Prune retires only members whose recorded Git identity is definitely stale. Relink restores a retired member only when its original private and common Git directories still match, as after `git worktree move`; it cannot attach a replacement clone.
-
-Create and add initialize missing `.sametree/` project files in the current member but do not configure harness integrations; run `sametree setup` separately where Claude Code or OpenCode will run. Agent-facing MCP exposes no direct lifecycle tool; automatic enrollment occurs during Coordinator startup from observed activity. Other lifecycle commands do not create agent sessions. Workspace names cannot start with `.` or contain path separators. Add and relink accept an exact ID or unique workspace name; duplicate names require the ID, and path-like arguments are rejected because `--cwd` selects the joining worktree. SameTree does not create repositories, branches, or worktrees. A custom registry selected with `SAMETREE_WORKSPACE_REGISTRY` must be inherited by every CLI, MCP, and adapter process.
-
-## Identity and Sessions
-
-An agent name is unique within one workspace and contains letters, numbers, `.`, `_`, or `-`. MCP adapters generate a process-scoped name from the harness's native session identifier, falling back to the MCP process ID. Claude's native session ID is an automatic-workspace activity ID. OpenCode's process ID is qualified with operating-system process-start identity where available; set `SAMETREE_ACTIVITY_ID` on platforms that cannot provide it. Automatic plan publication uses the same identity when available, while plan continuity is keyed by the stable harness and harness session ID so a resumed process does not duplicate a proposal. Set `SAMETREE_AGENT` when a durable human-readable identity such as `claude-reviewer` or `opencode-1` is required, but never reuse it for independent processes in the same workspace.
-
-A session represents one Coordinator-backed process lifetime and has one home member. It records the home member's starting branch and HEAD descriptor. Coordination CLI commands, MCP servers, watchers, message followers, and plan publishers create sessions; setup, workspace lifecycle, and diagnostics do not. Built-in sessions remain in the session table for lease ownership and diagnostics but omit lifecycle audit events. Library callers emit `session.started` and `session.closed` by default and may disable them. An MCP heartbeat renews:
-
-- The session expiry.
-- The execution lease of in-progress tasks started by that session.
-
-Agent identity is cooperative, not authenticated. Do not use SameTree across hostile trust boundaries.
-
-## Tasks
-
-Task states are:
+`git rev-parse --git-common-dir` defines the line. The database is always:
 
 ```text
-ready ───────▶ in_progress ───────▶ done
-  │                  │
-  │                  ├────────────▶ blocked
-  │                  └────────────▶ cancelled
-  ├───────────────────────────────▶ cancelled
-  └───────────────────────────────▶ blocked
+<git-common-dir>/clankchat/state.sqlite3
 ```
 
-The service permits explicit updates between these states by the current assignee. The diagram shows the expected workflow, not every administrative recovery path.
+Linked worktrees therefore share state. Separate clones do not. clankchat never scans neighboring directories or groups repositories by remote URL.
 
-Tasks are awareness records for work already assigned by the user, not a peer-managed work queue. Task invariants:
+## Identity And Presence
 
-- A task cannot be started until every dependency is `done`.
-- New tasks are assigned to the agent that creates them. An agent cannot create a task assigned to a peer.
-- A ready task with an assignee can be started only by that assignee.
-- Normal starting never changes an existing assignment, even after its execution lease expires.
-- Adopting a legacy unassigned task requires the exact current revision, an audit reason, and explicit user authorization.
-- `done`, `cancelled`, and `blocked` tasks cannot be started.
-- Task updates require assignment to the current agent.
-- Every transition into `in_progress` rechecks dependencies.
-- Every mutation increments `revision`.
-- Callers may submit `expectedRevision` to reject stale updates.
-- A task may tag up to 100 affected members. Tags describe impact; they do not restrict visibility, ownership, or authorization.
-- Creating or updating tags requires available members. Historical tasks remain filterable by an unavailable member.
+An agent has a validated name and a harness: `claude-code`, `opencode`, or `other`. `CLANKCHAT_AGENT` provides an explicit name. Otherwise Claude Code uses its native session ID and OpenCode uses its native process identity.
 
-Assignments are durable agent ownership. Execution leases identify the active session. Keeping these separate makes crashed work visible instead of silently re-queuing it.
+Each harness lifecycle opens a session with heartbeat and expiry timestamps. A restarted delivery subprocess or heartbeat after sleep resumes the same explicit harness session; ordinary CLI processes replace expired sessions. Pending delivery owned by an expired or closed session becomes available to another live session.
 
-Task create/update accepts replacement member lists; an empty MCP list or CLI `--clear-members` clears them. CLI `--member` may repeat, and `task list --member` filters tasks explicitly tagged with that member. Untagged tasks are workspace-global records and do not match a member filter.
-
-Status is a current-state view by default: it includes workspace metadata, all members, active sessions, agents with a live session, every nonterminal task, active shared-instruction summaries and acknowledgement state, unread message and handoff counts, and warnings. The deprecated `claims` field remains present as an empty array for library compatibility. Agent rows list their active members. Callers can explicitly include inactive agents, terminal tasks, and revoked instructions. Task listing defaults to 25 nonterminal rows, accepts a maximum of 100, and uses the last returned task ID as the `after` cursor. A status filter selects that state even when it is terminal. Invalid limits are rejected rather than silently clamped.
-
-Every status response also observes the caller's live worktree root, branch or detached state, full commit ID, and dirty state. An unborn branch has a `null` commit; detached HEAD has a `null` branch. Dirty state includes staged, unstaged, conflicted, submodule, and untracked changes, but not ignored files. Other member rows expose identity, root, repository, and availability; their HEAD metadata is refreshed internally for session and branch warnings.
-
-Status refreshes every available member's HEAD. A session whose home member moved from its starting branch produces `BRANCH_CHANGED`; a transition between branches or detached state records `worktree.branch_changed`. Ordinary commits on one branch do not produce branch-change events. Branch changes preserve tasks and leases because every process sharing that physical checkout sees the same switch.
-
-### Forced Takeover
-
-Normal task starting never changes another agent's assignment. When the user explicitly reassigns work, `sametree_task_force_takeover` or `sametree task force-takeover` transfers it regardless of whether its execution lease is live or expired.
-
-A forced takeover requires:
-
-- A nonterminal assigned task owned by another agent.
-- The exact current task revision.
-- A non-empty audit reason.
-- An explicit `userAuthorized: true` assertion or `--user-authorized` flag.
-
-The task transfers in one immediate transaction. A stale revision or invalid task state rolls back the operation. Success increments the task revision and records `task.force_taken_over` with the previous assignee, previous lease expiry, and reason. Ready work with finished dependencies starts a new execution lease; blocked or dependency-blocked work keeps its current state without a lease so the new owner can resolve it explicitly. The library accepts legacy `claimIds` input but ignores it and returns `claims: []`.
-
-Expired work remains assigned and uses the same user-authorized takeover path. The authorization field is an auditable cooperative assertion, not authentication; SameTree remains unsuitable across hostile trust boundaries.
-
-## Review Threads And Overlap
-
-SameTree uses task-linked messages for review coordination. An implementer sends a review request with:
-
-- The reviewer as recipient.
-- The implementation task ID.
-- A subject and body containing the commit, summary, and verification results.
-
-The first message ID becomes its default thread ID. The reviewer sends findings with the same task ID and thread ID. Follow-up fixes and the final no-findings response continue in that thread, preserving the full review loop without asking the user to copy context between agents.
-
-Review messages remain non-authoritative peer context. They do not assign review work, expand implementation scope, or transfer task ownership. The user must assign each agent's scope directly. Harness followers deliver addressed review messages to active Claude Code and OpenCode sessions; inbox state remains durable when an agent is offline.
-
-SameTree does not reserve files, reject overlapping edits, infer path ownership, or restrict filesystem and tool access. Agents retain whatever access their harness and operating-system account provide, whether or not a path belongs to a workspace member. They must preserve concurrent changes they did not create and serialize likely overlapping writers through messages.
-
-Databases upgraded from releases before 0.1.7 retain `path_claims` and historical claim events as archival data. Current CLI and MCP claim tools do not exist. Deprecated library acquisition throws `INVALID_INPUT`; listing returns `[]`; release returns `{ released: 0 }`; and lease recovery reports `claims: 0`.
-
-## Proposed Plans
-
-A proposed plan is durable, revisioned workspace context. It contains an author, source harness and session, optional task, title, Markdown body, content hash, and immutable source-event ID. A plan body is limited to 48,000 characters and its title to 200 characters. The first publication creates revision 1; later source events from the same harness session append immutable revisions. Replaying one source event with identical content is idempotent, while replaying it with different content returns `PLAN_CONFLICT`.
-
-Automatic capture happens at the harness's proposal boundary:
-
-- Claude Code publishes the `ExitPlanMode` plan from a `PreToolUse` plugin hook before approval.
-- Current OpenCode versions publish the finalized `.opencode/plans/` file from `tool.execute.before` when Plan calls `plan_exit`, before its Build-agent approval question.
-- OpenCode ignores child-session and ordinary Plan responses because those turns can be clarification or progress updates rather than finalized proposals.
-
-Claude Code publication fails open. Its wrapper forwards the hook payload, waits at most two seconds, suppresses SameTree failures, and always returns success, so a missing executable, unavailable database, invalid payload, or hung publication cannot prevent `ExitPlanMode` from presenting the proposal. OpenCode catches publication errors inside its adapter rather than turning them into SameTree coordination decisions. In either harness, a failed proposal may be absent from SameTree until a later successful publication.
-
-Every new revision sends its full body to each live peer as an addressed message on `plan:<plan-id>`. The notification states that the proposal is context rather than authorization. SameTree does not assign a reviewer, transfer a task, or authorize implementation. Agents that start later can discover current summaries through status or plan listing and retrieve any immutable revision explicitly.
-
-The CLI exposes `sametree plan publish`, `sametree plan show`, and `sametree plan list`. MCP exposes `sametree_plan_publish`, `sametree_plan_get`, and `sametree_plan_list`. Listing is ordered by immutable plan creation time so pagination remains stable when older plans receive revisions.
-
-## Shared User Instructions
-
-A shared instruction is direct user context propagated to agents in the workspace. It is distinct from repository policy, proposed plans, peer messages, and tasks:
-
-- Policy is durable, Git-tracked repository guidance.
-- A shared instruction is a revisioned user directive that may constrain existing assignments.
-- A proposed plan is non-authoritative agent context.
-- A peer message is non-authoritative context from another agent.
-- A task records work the user already assigned.
-
-Shared instructions never create a task, assign work, or expand an agent's scope. An optional task ID narrows context to that task without mutating task state or ownership.
-
-Automatic capture requires a user prompt to begin at its first character with the exact, case-sensitive prefix `For all agents:`. SameTree stores the complete prompt, including the prefix and all whitespace. Leading whitespace, different capitalization, mentions of the phrase elsewhere, and every other ordinary prompt remain local and never reach the Coordinator.
-
-Capture uses native user-message boundaries:
-
-- Claude Code uses `UserPromptSubmit`. Its fail-open wrapper waits at most two seconds and suppresses all SameTree errors.
-- OpenCode uses `chat.message` only for a root session. It ignores child-session messages and parts carrying SameTree delivery metadata, and catches capture errors without rejecting the prompt.
-
-The first authorized record creates revision 1 with exact text, a SHA-256 content hash, source harness/session/event identity, actor, reason, scope, and timestamp. Replaying the same source identity with the same text and scope is idempotent; different content returns `INSTRUCTION_CONFLICT`. Distinct source events may contain identical text and remain distinct instructions.
-
-User-authorized revisions append immutable replacement text. User-authorized revocation appends a tombstone revision and removes the instruction from active status. Both operations require the exact current revision, an audit reason, and `userAuthorized: true`; revoked instructions cannot be reactivated. Historical revisions remain readable.
-
-Each new current revision creates a structurally linked addressed notice for every already registered peer. Superseded notices are excluded from unread counts and automatic delivery. Harness adapters render linked notices as direct user-authorized context rather than ordinary peer messages. Agents that register later discover active summaries in status and retrieve exact text with `sametree_instruction_get`.
-
-Acknowledgements are per agent, instruction, and revision. The recording actor acknowledges its own revision in the recording transaction. Another agent calls `sametree_instruction_ack` only for the current revision after reading it; this also marks that revision's linked notice read. A later revision requires a new acknowledgement.
-
-The CLI exposes `sametree instruction record`, `revise`, `revoke`, `show`, `list`, and `ack`. MCP exposes only `sametree_instruction_get`, `sametree_instruction_list`, and the per-agent `sametree_instruction_ack`; it deliberately has no fleet-wide mutation tools. Native exact-prefix capture records a new instruction. A user-operated CLI/library call records, revises, or revokes one with a direct-user-authorization assertion. Listing returns summaries without full text; `show`/`get` returns exact current or historical content.
+`agents` returns names, harnesses, online state, live session count, and first/last-seen times.
 
 ## Messages
 
-An ordinary message is immutable, non-authoritative peer context and contains:
+Messages are immutable and have:
 
-- Sender and optional recipient.
-- Subject and body.
-- Thread ID.
-- Optional task ID.
-- Creation time.
+- An ID and creation time.
+- A sender and optional direct recipient.
+- A body of at most 50,000 characters.
+- A kind: `message`, `request`, or `reply`.
+- Optional correlation and reply-to IDs.
+- A pinned flag valid only for broadcasts.
 
-Omitting the recipient broadcasts to every other registered agent. Read receipts are per agent, so one recipient acknowledging a broadcast does not hide it from others. Ordinary messages can report findings, status, requests, or conflicts, but cannot assign work or override user instructions. Shared-instruction notices use a separate structural relation to identify their authoritative user-originated content; text in an ordinary message cannot imitate that relation.
+A direct recipient must already have joined the line. An ordinary broadcast materializes recipient rows for known agents other than the sender in the same transaction.
 
-Message delivery and message acknowledgement are separate. A live follower atomically reserves the oldest unread, undelivered message for its agent identity. SameTree records delivery only after the harness adapter accepts the message, but leaves the read receipt empty until the agent explicitly acknowledges it.
+Read acknowledgement and live delivery are independent. Acknowledgement is idempotent.
 
-Claude Code receives messages through the SameTree plugin monitor. OpenCode receives them through a project TUI plugin that reads the live selected route, injects an asynchronous prompt into its root session, verifies persistence with stable OpenCode message IDs, and confirms acceptance over the follower's stdin. Reservations are released on graceful shutdown and can be recovered after an expired follower session, so another process can retry without concurrent duplicate delivery.
+## Request And Reply
 
-OpenCode attach mode is excluded from automatic delivery because the local TUI process and attached server have different process-derived SameTree identities. The adapter refuses to consume that mismatched inbox.
+An awaited send creates a durable direct `request` with a correlation ID, then polls for a `reply` referencing the request ID. The timeout belongs only to the waiting call: it never deletes or cancels the request.
 
-`sametree message follow` exposes the same durable stream for other adapters. `--json` emits JSON Lines, `--once` drains currently available messages, and `--ack-stdin` requires each emitted message ID on stdin before recording delivery.
+Only the request recipient may reply, and a request accepts one reply. A reply after timeout remains durable. A later wait for the same request returns it. Concurrent waits query by request ID, so replies arriving in any order resolve only their matching calls.
 
-## Handoffs
+When an awaited reply is returned, its recipient row is marked delivered and read so the ordinary live follower does not intentionally inject it again.
 
-A handoff is an offer/accept protocol rather than an immediate reassignment.
+## Pinned Broadcasts
 
-An offer captures:
+Prompt capture accepts only text beginning at its first character with `For all agents:`. Leading whitespace and different capitalization do not match. Capture failures are suppressed so chat can never prevent a harness from accepting a user prompt.
 
-- Current task and task revision.
-- Source and destination agents.
-- Human-readable summary.
-- Structured JSON context.
-- Expiry.
+Pinned broadcasts go to every active session except the sending session. Every new session also receives historical pins. Recipient insertion uses the same immediate SQLite writer transaction as message creation, preventing a send/join race from losing a pin. Live-delivery keys include the recipient scope so one session cannot suppress another session's pin.
 
-Structured context is limited to 100,000 serialized UTF-8 bytes. The library accepts legacy `claimIds` input but ignores it.
+## Live Delivery
 
-An offer is non-authoritative until the user explicitly directs the recipient to accept it. Authorized acceptance is one transaction. It verifies that the offer is active and that the task revision still matches, then transfers assignment and starts a destination execution lease. If the task changed after the offer, acceptance fails with `HANDOFF_CONFLICT` and the agents must create a fresh offer.
+A recipient row can be pending, reserved by a session, delivered, and read. Reservation and completion use immediate transactions. Only one live session can reserve a recipient row. A closed or expired owner can be replaced.
 
-Rejection records a terminal handoff state without changing task ownership.
+OpenCode persists stable target message and part IDs before injection, searches existing root sessions for the delivery key, and confirms persistence before acknowledging clankchat. Claude Code receives JSON Lines through its local monitor. The transport is fail-open: adapter errors never restrict normal harness operation.
 
-## Policy
+## Events And Watch
 
-Policy is the tracked `.sametree/policy.md` file in each member. SameTree computes its SHA-256 hash and records acknowledgements by agent, hash, and member. CLI `policy show` and `policy ack` accept `--member`; the MCP policy tools accept an optional `member`.
+The append-only event stream records agent joins, session starts, message sends, requests, replies, pins, and reads. `watch` pages by monotonic sequence. Human output neutralizes terminal control characters; `--json` emits JSON Lines.
 
-Editing any byte produces a new hash, so previous acknowledgements no longer satisfy the current policy. Clients should read the policy state at session start.
+## MCP
 
-Acknowledgement is idempotent per agent, member, and policy hash: repeating it preserves the original timestamp and does not append another event. Identical bytes in two members still require separate acknowledgements. The acknowledgement operation returns only the hash, timestamp, and whether a row was newly recorded; policy content remains in `sametree_policy_get`. Clients should acknowledge only when that read reports `acknowledgedAt` as `null`.
+The MCP server exposes seven tools:
 
-Prompt policy is backed by optional Git hooks for rules that can be checked mechanically. Hooks remain bypassable safety rails.
+```text
+clankchat_send
+clankchat_reply
+clankchat_inbox
+clankchat_ack
+clankchat_agents
+clankchat_status
+clankchat_heartbeat
+```
 
-## Events
+There are no MCP resources.
 
-Every meaningful coordination mutation appends an event in the same transaction as current state. Explicit workspaces use one global sequence, and applicable events include member/worktree origin. Imported events receive new sequences while source sequence metadata is retained internally. Built-in process lifecycle churn is retained in session rows rather than copied into the event stream. Shared instructions append `instruction.recorded`, `instruction.revised`, `instruction.revoked`, or `instruction.acknowledged`; plan revisions append `plan.published` or `plan.revised` alongside notification events; task execution appends `task.started`. Historical claim events remain readable and retain their existing formatter. Consumers call `sametree_events` with the last seen sequence and persist the returned maximum as their next cursor. Direct reads default to 25 events and accept an explicit limit up to 1,000; streaming watchers request larger pages internally.
+## SQLite
 
-Event polling is intended for context refresh and debugging. Current-state tools remain authoritative for decisions.
-
-## Error Codes
-
-Expected failures return stable machine-readable codes:
-
-| Code | Meaning |
-| --- | --- |
-| `AGENT_REQUIRED` | No agent identity was provided |
-| `CLAIM_CONFLICT` | Retained in the public error type for historical compatibility; current claim APIs do not emit it |
-| `DATABASE_ERROR` | The database schema, identity, or migration is invalid |
-| `HANDOFF_CONFLICT` | A handoff expired, resolved, or references stale work |
-| `GIT_STATUS_ERROR` | Git could not report live branch or worktree state |
-| `HOOK_REFUSED` | A configured Git policy check failed |
-| `INSTRUCTION_CONFLICT` | A shared-instruction source event, revision, or lifecycle state conflicts |
-| `INVALID_INPUT` | Input or repository configuration is invalid |
-| `NOT_ASSIGNED` | The actor does not own the requested entity |
-| `NOT_FOUND` | A referenced agent, task, instruction, plan, message, or handoff is absent |
-| `PLAN_CONFLICT` | A harness plan event conflicts with an existing revision or task association |
-| `NOT_GIT_REPOSITORY` | The working directory is not a non-bare Git tree |
-| `POLICY_NOT_FOUND` | `.sametree/policy.md` is missing |
-| `TASK_BLOCKED` | Task dependencies are unfinished |
-| `TASK_UNAVAILABLE` | Task state, owner, lease, or revision prevents mutation |
-| `USER_AUTHORIZATION_REQUIRED` | The operation would change user-owned agent scope without explicit authorization |
-| `WORKSPACE_ERROR` | Workspace registration, member, binding, or lifecycle state is invalid |
-
-MCP returns these as tool errors with the full structured object. The CLI writes the same object to stderr and exits non-zero.
+The database uses WAL mode, foreign keys, strict tables, a busy timeout, and immediate writer transactions for audience creation, replies, acknowledgement, and delivery reservation. clankchat rejects symlinked state paths and never opens databases from the previous product.

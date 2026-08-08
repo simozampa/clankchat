@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 
-// Plan awareness must never prevent Claude from presenting a plan to the user.
-const executable = process.env.SAMETREE_BIN || 'sametree';
+// Chat awareness must never prevent Claude from accepting a user prompt.
+const executable = process.env.CLANKCHAT_BIN || 'clankchat';
 const script = /\.[cm]?js$/iu.test(executable);
 const command = script ? process.execPath : executable;
-const args = [...(script ? [executable] : []), 'hook', 'claude-plan'];
+const args = [...(script ? [executable] : []), '--harness', 'claude-code', 'message', 'capture'];
 const env = {
   ...process.env,
-  SAMETREE_CWD: process.env.CLAUDE_PROJECT_DIR || process.cwd(),
+  CLANKCHAT_CWD: process.env.CLAUDE_PROJECT_DIR || process.cwd(),
 };
 
 try {

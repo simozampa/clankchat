@@ -3,9 +3,9 @@ dist/
 coverage/
 *.log
 .DS_Store
-.sametree-install-runtime.json
+.clankchat-install-runtime.json
 
-# SameTree's live database belongs to Git, but keep test fixtures and accidental
+# clankchat's live database belongs to Git, but keep test fixtures and accidental
 # local copies out of commits too.
 *.sqlite
 *.sqlite-shm

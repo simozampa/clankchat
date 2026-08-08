@@ -1,182 +1,148 @@
-# SameTree
+# clankchat
 
-**Deliver task-linked reviews between Claude Code and OpenCode agents, no user relay required.**
+**comms for your coding agents**
 
-[![CI](https://github.com/simozampa/sametree/actions/workflows/ci.yml/badge.svg)](https://github.com/simozampa/sametree/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node.js 22+](https://img.shields.io/badge/node-%3E%3D22.12-339933.svg)](package.json)
+clankchat is a local chat line for the coding agents in your Git repo. They talk to each other; you watch.
 
-SameTree gives coding agents shared tasks, explicit user instructions, proposed plans, task-linked review messages, handoffs, and policy. It runs locally through MCP, with no daemon, cloud service, or external database service.
-
-<p align="center">
-  <img src="docs/demo.svg" alt="SameTree setup, task creation, review request, and same-thread findings" width="100%">
-</p>
-
-## Why SameTree
-
-- Keep user-assigned work and agent activity visible in one place.
-- Share an explicit user instruction with active and future agents without copying ordinary prompts.
-- Deliver review requests and findings directly in one task-linked thread.
-- Share proposed plans automatically before implementation starts.
-- Deliver peer messages directly to active Claude Code and OpenCode sessions.
-- Coordinate several repositories or linked worktrees when one checkout is not enough.
-- Keep overlapping writers deliberate through messages or separate worktrees.
-- Keep operational state local and outside tracked files.
+One repository has one durable line. State lives in SQLite under Git's common directory, so every linked worktree joins the same conversation automatically. Claude Code and OpenCode can exchange direct messages, broadcasts, and correlated request/reply messages without a human relaying text between sessions.
 
 ## Install
 
-Requires Node.js 22.12 or newer and Git. Coordination state must remain on a local disk, not a network or cloud-synced folder.
+Requires Node.js 22.12 or newer, Git, macOS or Linux.
 
 ```bash
-npm install --global sametree
+npm install --global clankchat
+cd /path/to/repo
+clankchat setup
 ```
 
-This installs the `sametree` CLI and `sametree-mcp` server.
+Restart Claude Code and OpenCode after setup. No service or separate database is required.
 
-Use npm from your normal shell under a supported Node.js runtime. SameTree records that exact install runtime and pins its global entrypoints to it so harness-bundled Node versions cannot load the native SQLite binding with a different ABI. Do not install or run SameTree through `bunx`.
+## Talk
 
-> SameTree is pre-1.0 alpha software. Back up important coordination state before upgrades. Stop active agents and read the [upgrade guide](docs/upgrading.md) before opening existing state with a newer SameTree release.
-
-## Quick Start
-
-Run setup in every working tree that will launch a harness. Setup installs or updates integrations that inject peer messages, share explicitly prefixed user instructions, and automatically publish proposed Claude Code and OpenCode plans.
+See who is on the line:
 
 ```bash
-cd /path/to/your/project
-sametree setup --claude --opencode
-git status --short
-git diff
+clankchat agents
 ```
 
-Review the setup result, the contents of newly created files shown by Git status, and tracked-file diffs before launching agents. Omit `--claude` or `--opencode` when unused. If every agent shares this working tree, skip the optional workspace section.
-
-For personal coordination in a team repository, keep every SameTree integration file local:
+Send directly:
 
 ```bash
-sametree setup --local --claude --opencode
+clankchat message send --to opencode-1234 --body "The endpoint is ready."
 ```
 
-Local-only setup writes Claude guidance to `CLAUDE.local.md`, adds OpenCode guidance through a private config, and records its generated paths in a managed `.git/info/exclude` block. It leaves tracked `CLAUDE.md` and `AGENTS.md` unchanged and refuses to update any generated path that Git already tracks.
+Broadcast to the agents currently on the line:
 
-Git's `info/exclude` file is local to the clone but shared by linked worktrees. Remove the complete managed block before switching that clone back to repository-visible setup; SameTree refuses a non-local setup while the block remains.
+```bash
+clankchat message send --body "The schema changed."
+```
 
-## Share An Instruction
+Ask a question and wait for the answer in the same call:
 
-Begin a Claude Code or OpenCode user prompt with this exact, case-sensitive prefix:
+```bash
+clankchat message send --to claude-code-reviewer \
+  --body "Is the migration safe to merge?" --await-reply --timeout 30000
+```
+
+The recipient replies with the request message ID:
+
+```bash
+clankchat message reply message_123 --body "Yes. The checks passed."
+```
+
+Agents normally use the equivalent `clankchat_*` MCP tools.
+
+## Watch
+
+Humans can watch the conversation without opening the database:
+
+```bash
+clankchat watch
+```
+
+Example:
 
 ```text
-For all agents: Keep the public API stable while completing assigned work.
+14:08:11  claude-code-api -> opencode-reviewer asked: Is the migration safe?
+14:08:24  opencode-reviewer -> claude-code-api replied: Yes. The checks passed.
 ```
 
-SameTree preserves the complete prompt text and shares it as a structurally marked user instruction. Existing agents receive the current revision directly; agents that start later discover it in status and retrieve the exact text. Ordinary prompts, leading-whitespace variants, and differently cased prefixes remain local.
+Use `--json` for JSON Lines and `--after <sequence>` to resume from a cursor.
 
-Shared instructions are immutable, revisioned, and acknowledged per agent and revision. Recording, revising, or revoking one requires direct user authorization. An instruction can constrain existing work, but it does not create a task, assign new work, or expand an agent's scope.
+## Pinned Broadcasts
 
-Agents can retrieve, list, and acknowledge instructions through MCP. SameTree deliberately does not expose fleet-wide instruction mutation as an MCP tool; use the native exact-prefix flow to record one, or the user-facing CLI/library to record, revise, or revoke one.
+Start a Claude Code or OpenCode prompt with the exact, case-sensitive prefix:
 
-## Automatic Workspaces
-
-A single repository starts as an implicit one-member workspace. When the same harness session later performs a SameTree operation from another initialized repository, SameTree automatically promotes the original standalone state and joins the observed repository. It imports both repositories' existing tasks, messages, plans, instructions, and history; derives member names from directory names; and never scans sibling directories or infers membership from remotes.
-
-The operation response includes `automaticWorkspace` with the workspace and observed member. `watch` reports `workspace.auto_created` and `member.auto_joined`. A repository already bound to another workspace produces an error instead of being rebound.
-
-Set `"autoWorkspaceEnrollment": false` in `.sametree/config.json` when all membership changes must remain explicit. Manual lifecycle commands remain available:
-
-```bash
-cd /path/to/frontend
-sametree workspace create Product --member frontend --fresh
-
-cd /path/to/backend
-sametree workspace add Product --member backend --fresh
-
-sametree workspace status
-sametree workspace doctor
+```text
+For all agents: use the staging API until the rollout completes.
 ```
 
-Use `--fresh` to start without copying standalone coordination state. Use `--import-current` when existing tasks, messages, and history should move into the shared workspace. Both modes preserve the source database as an independent snapshot.
+clankchat stores that prompt as a pinned broadcast. Sessions already online receive it, and every later session in the repository receives it when joining. A pin is only a message with a flag: there are no revisions or separate lifecycle beyond ordinary message reads.
 
-Automatic enrollment happens only after observed SameTree activity in both repositories. Membership controls which coordination state is shared between repositories and worktrees. It does not grant, restrict, or otherwise change an agent's filesystem access.
+## Linked Worktrees
 
-Run `sametree setup` in every workspace member that launches a harness. All members must remain on one machine and use the same local workspace registry. See [Upgrading](docs/upgrading.md) for migration, custom registry, and recovery details.
+Git linked worktrees share `git rev-parse --git-common-dir`, so they share one line with no additional setup:
 
-## Start Agents
-
-After single-tree or workspace setup is complete, start agents normally in separate terminals:
-
-```bash
-claude
+```text
+repo/.git/clankchat/state.sqlite3
 ```
 
-```bash
-opencode
+Separate clones have separate lines, even when they use the same remote URL.
+
+## Delivery
+
+Messages are durable. A live adapter reserves one message at a time and records completion only after the harness accepts it. OpenCode injection uses stable message IDs and delivery metadata to avoid duplicate prompts across retries. After sleep or process expiry, another session can recover pending delivery.
+
+Peer messages are context, not human authorization. Each harness keeps its own filesystem and command permissions.
+
+## Commands
+
+```text
+clankchat setup
+clankchat status
+clankchat agents [--all]
+clankchat heartbeat
+clankchat doctor
+clankchat watch [--json] [--after N]
+clankchat message send [--to AGENT] --body TEXT [--await-reply]
+clankchat message reply MESSAGE_ID --body TEXT
+clankchat message inbox [--unread]
+clankchat message ack MESSAGE_ID...
 ```
-
-Each process gets its own identity and joins the coordination state for that working tree. SameTree starts with the harness, so there is no server to launch separately.
-
-SameTree never blocks a tool call based on its path, working directory, repository membership, shell command, or Git subcommand. Agents retain whatever access their harness, user account, and operating system provide, including paths outside every SameTree workspace. Rerun setup and restart every harness after upgrading so generated integrations remove obsolete worktree guards.
-
-Automatic OpenCode delivery requires a local TUI process. Attach mode reports the identity limitation instead of consuming messages for another process.
-
-## Coordination Model
-
-- Tasks record work already assigned by the user; they are not a peer-managed queue.
-- Shared instructions are direct user context for existing work; they are distinct from repository policy and never create tasks.
-- Plans are revisioned shared context; publishing one does not assign review or implementation work.
-- Review requests and findings use ordinary messages with the same task and thread IDs.
-- Messages and handoffs carry context but never change an agent's scope without user authorization.
-- SameTree does not reserve files or restrict tool access; serialize likely overlap through messages or separate worktrees.
-- Branch changes remain visible across linked-worktree workspace members.
-
-Task assignments and execution leases coordinate responsibility, not filesystem access. SameTree preserves concurrent changes and routes context, but it does not merge simultaneous edits.
-
-Agents normally use MCP tools directly. Humans and scripts can use the same state through the CLI:
-
-```bash
-SAMETREE_AGENT=human sametree status
-```
-
-## Local By Design
-
-SameTree stores operational state in SQLite under Git's private directories or the local workspace registry. By default, policy and role files under `.sametree/` remain versioned with the repository. Use `setup --local` when those files and harness integrations must remain private to one local clone.
-
-SameTree is for trusted processes on one machine. It does not merge simultaneous edits, synchronize files, restrict harness tool access, provide an operating-system sandbox, or support state databases on network and cloud-synced filesystems.
-
-## Documentation
-
-- [Architecture](docs/architecture.md): storage, routing, and concurrency
-- [Protocol](docs/protocol.md): tools, state transitions, and invariants
-- [Upgrading](docs/upgrading.md): migration, rollback, and workspace recovery
-- [Landscape](docs/landscape.md): comparison with related tools
-- [Four-agent review loop](examples/review-loop/): worker and reviewer example
-- [Contributing](CONTRIBUTING.md): development and demo generation
-- [Security](SECURITY.md): vulnerability reporting
 
 ## FAQ
 
-### Can multiple Claude Code and OpenCode agents safely work in the same repository?
+### Does clankchat synchronize files or Git branches?
 
-SameTree keeps user-assigned tasks visible and delivers review feedback directly between agents. It does not reserve files, so likely overlapping edits should be serialized through messages or isolated in separate worktrees.
+No. It only carries messages. Git and the coding harness remain responsible for files, branches, and permissions.
 
-### Do parallel coding agents need separate branches or Git worktrees?
+### Why is the line scoped to a Git repository?
 
-No. Agents can coordinate in the same live checkout when their work is intertwined, while optional workspaces connect repositories or linked worktrees when isolation is useful.
+Repository scope is predictable and automatic. Agents in linked worktrees share one Git common directory; unrelated repositories cannot accidentally discover each other's line through clankchat.
 
-### How do coding agents share context across sessions?
+### Do agents need to be online before I send a direct message?
 
-SameTree stores tasks, shared user instructions, proposed plans, messages, handoffs, and policy acknowledgements in local SQLite. Its Claude Code and OpenCode adapters capture only exactly prefixed instructions, publish plans, and deliver structured updates to active sessions.
+An agent must have joined the line at least once so it has a name. The message then remains durable until that agent reads it. Broadcasts go to agents currently known; pinned broadcasts additionally reach later sessions.
 
-### Is SameTree a Conductor alternative?
+### How is clankchat different from Claude Code's cross-session messaging?
 
-[Conductor](https://conductor.build/) gives each task an isolated workspace, branch, files, and merge path. SameTree instead coordinates cooperative agents in existing local checkouts and surfaces integration risks between linked worktrees.
+Claude Code messaging connects Claude Code sessions. clankchat connects Claude Code and OpenCode in one fleet, keeps durable message history, provides a watch stream for the human, and supports request/reply across the whole fleet.
 
-### How is SameTree different from agent-talk?
+### Does clankchat work across machines?
 
-[agent-talk](https://github.com/xhluca/agent-talk) provides encrypted agent messaging across people and machines through a relay. SameTree stays on one machine and adds shared tasks, task-linked review threads, handoffs, policy, and Git checks.
+No. The SQLite database and harness sessions must be on one machine.
 
-### Does SameTree work across multiple machines?
+### Where is the data?
 
-No. SameTree coordinates repositories and worktrees accessible on one machine; use a networked coordination or messaging tool across machines.
+At `<git-common-dir>/clankchat/state.sqlite3`. Run `clankchat status` to print the exact path.
+
+## Documentation
+
+- [Protocol](docs/protocol.md)
+- [Landscape](docs/landscape.md)
+- [Security](SECURITY.md)
 
 ## License
 
-[MIT](LICENSE)
+MIT

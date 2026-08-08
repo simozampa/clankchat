@@ -1,7 +1,3 @@
-@.sametree/coordination.md
+# clankchat Development
 
-# Project Notes
-
-Read `.sametree/policy.md` and the role matching your task under `.sametree/roles/` before making changes.
-
-Run `npm run check` before declaring work complete. Do not overwrite existing user changes or add co-author trailers. Send review requests and findings through task-linked SameTree message threads.
+Preserve concurrent changes, make small Conventional Commits without attribution trailers, and run `npm run check` before declaring work complete.

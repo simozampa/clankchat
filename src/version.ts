@@ -10,7 +10,7 @@ if (
   !('version' in metadata) ||
   typeof metadata.version !== 'string'
 ) {
-  throw new Error('SameTree package metadata has no version.');
+  throw new Error('clankchat package metadata has no version.');
 }
 
 export const VERSION = metadata.version;

@@ -5,9 +5,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const INSTALL_RUNTIME_FILE = fileURLToPath(
-  new URL('../.sametree-install-runtime.json', import.meta.url),
+  new URL('../.clankchat-install-runtime.json', import.meta.url),
 );
-const RELAUNCHED_ENVIRONMENT = 'SAMETREE_INSTALL_RUNTIME_RELAUNCHED';
+const RELAUNCHED_ENVIRONMENT = 'CLANKCHAT_INSTALL_RUNTIME_RELAUNCHED';
 
 function sameFile(left: string, right: string): boolean {
   try {
@@ -85,7 +85,7 @@ export async function runWithInstallRuntime(
     };
     child.once('error', (error) => {
       process.stderr.write(
-        `SameTree could not launch its install Node runtime: ${String(error)}\n`,
+        `clankchat could not launch its install Node runtime: ${String(error)}\n`,
       );
       finish(1);
     });

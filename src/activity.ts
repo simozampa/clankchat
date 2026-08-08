@@ -1,29 +1,28 @@
-import { readFileSync } from 'node:fs';
-
 import type { Harness } from './types.js';
 
-function processStartToken(processId: string): string | null {
-  if (!/^\d+$/u.test(processId)) return null;
-  try {
-    const stat = readFileSync(`/proc/${processId}/stat`, 'utf8');
-    const fields = stat
-      .slice(stat.lastIndexOf(')') + 2)
-      .trim()
-      .split(/\s+/u);
-    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-    const started = fields[19];
-    return bootId && started ? `${bootId}:${started}` : null;
-  } catch {
-    return null;
-  }
+function safe(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/gu, '-').replace(/^-+|-+$/gu, '');
 }
 
-/** Distinguish reused OpenCode process IDs where the host exposes process start metadata. */
-export function harnessActivityId(
-  harness: Harness,
-  nativeSession: string | undefined,
-): string | undefined {
-  if (!nativeSession || harness !== 'opencode') return nativeSession;
-  const started = processStartToken(nativeSession);
-  return started ? `${nativeSession}:${started}` : undefined;
+export function detectHarness(environment: NodeJS.ProcessEnv = process.env): Harness {
+  if (environment.CLANKCHAT_HARNESS === 'claude-code') return 'claude-code';
+  if (environment.CLANKCHAT_HARNESS === 'opencode') return 'opencode';
+  if (environment.CLAUDE_CODE_SESSION_ID) return 'claude-code';
+  if (environment.OPENCODE_PID) return 'opencode';
+  return 'other';
+}
+
+export function agentIdentity(
+  harness = detectHarness(),
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  if (environment.CLANKCHAT_AGENT) return environment.CLANKCHAT_AGENT;
+  const native =
+    harness === 'claude-code'
+      ? environment.CLAUDE_CODE_SESSION_ID
+      : harness === 'opencode'
+        ? environment.OPENCODE_PID
+        : undefined;
+  if (!native) return `${harness}-${process.pid}`;
+  return `${harness}-${safe(native)}`.slice(0, 80);
 }

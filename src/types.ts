@@ -1,260 +1,59 @@
 export type Harness = 'claude-code' | 'opencode' | 'other';
-export type TaskStatus = 'ready' | 'in_progress' | 'blocked' | 'done' | 'cancelled';
-export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent';
-/** @deprecated Path claims are no longer active. */
-export type ClaimKind = 'exact' | 'tree';
-export type HandoffStatus = 'offered' | 'accepted' | 'rejected' | 'cancelled' | 'expired';
-export type SharedInstructionAction = 'recorded' | 'revised' | 'revoked';
-export type SharedInstructionStatus = 'active' | 'revoked';
+export type MessageKind = 'message' | 'request' | 'reply';
 
 export interface Agent {
   name: string;
   harness: Harness;
-  role: string;
-  activeMembers: string[];
-  createdAt: number;
+  online: boolean;
+  sessions: number;
+  firstSeenAt: number;
   lastSeenAt: number;
 }
 
 export interface Session {
   id: string;
   agentName: string;
-  homeWorktreeId: string;
-  homeMember: string;
-  startedHeadDescriptor: string;
-  startedBranch: string | null;
-  currentBranch: string | null;
-  branchChanged: boolean;
-  processId: number;
+  harness: Harness;
+  processId: number | null;
   startedAt: number;
   lastHeartbeatAt: number;
   expiresAt: number;
-  status: 'active' | 'closed';
-}
-
-export interface Task {
-  id: string;
-  title: string;
-  description: string;
-  status: TaskStatus;
-  priority: TaskPriority;
-  assignee: string | null;
-  leaseExpiresAt: number | null;
-  revision: number;
-  createdAt: number;
-  updatedAt: number;
-  dependencies: string[];
-  members: string[];
-}
-
-/** @deprecated Path claims are no longer active. */
-export interface PathClaim {
-  id: string;
-  worktreeId: string;
-  member: string;
-  path: string;
-  comparisonPath: string;
-  kind: ClaimKind;
-  agentName: string;
-  expiresAt: number;
-  createdAt: number;
-  warnings: CoordinationWarning[];
-}
-
-export interface CoordinationWarning {
-  /** LINKED_WORKTREE_OVERLAP is retained only for historical type compatibility. */
-  code: 'BRANCH_CHANGED' | 'LINKED_WORKTREE_OVERLAP';
-  message: string;
-  member: string;
-  worktreeId: string;
-  sessionId?: string;
-  conflictingClaimId?: string;
-  conflictingMember?: string;
+  closedAt: number | null;
 }
 
 export interface Message {
   id: string;
+  kind: MessageKind;
+  correlationId: string | null;
+  replyTo: string | null;
   sender: string;
   recipient: string | null;
-  subject: string;
   body: string;
-  threadId: string;
-  taskId: string | null;
+  pinned: boolean;
   createdAt: number;
+  deliveredAt: number | null;
   readAt: number | null;
-  instruction: SharedInstructionNotice | null;
+  /** Stable discriminator included only while a live delivery is reserved. */
+  deliveryScope?: string;
 }
 
-export interface SharedInstructionNotice {
-  id: string;
-  revision: number;
-  currentRevision: number;
-  status: SharedInstructionStatus;
-  action: SharedInstructionAction;
-  taskId: string | null;
-  createdBy: string;
-  recordedBy: string;
-  body: string | null;
-  isCurrent: boolean;
-}
-
-export interface SharedInstruction {
-  id: string;
-  createdBy: string;
-  taskId: string | null;
-  sourceHarness: Harness;
-  sourceSessionId: string;
-  sourceEventId: string;
-  revision: number;
-  status: SharedInstructionStatus;
-  action: SharedInstructionAction;
-  body: string | null;
-  contentHash: string | null;
-  recordedBy: string;
-  authorizationReason: string;
-  createdAt: number;
-  updatedAt: number;
-  revisionCreatedAt: number;
-  acknowledgedAt: number | null;
-}
-
-export interface SharedInstructionSummary {
-  id: string;
-  createdBy: string;
-  taskId: string | null;
-  sourceHarness: Harness;
-  sourceSessionId: string;
-  revision: number;
-  status: SharedInstructionStatus;
-  action: SharedInstructionAction;
-  recordedBy: string;
-  createdAt: number;
-  updatedAt: number;
-  revisionCreatedAt: number;
-  acknowledgedAt: number | null;
-}
-
-export interface SharedInstructionAcknowledgement {
-  instructionId: string;
-  revision: number;
-  acknowledgedAt: number;
-  newlyAcknowledged: boolean;
-}
-
-export interface Plan {
-  id: string;
-  author: string;
-  taskId: string | null;
-  sourceHarness: Harness;
-  sourceSessionId: string;
-  revision: number;
-  title: string;
-  body: string;
-  contentHash: string;
-  sourceEventId: string;
-  createdAt: number;
-  updatedAt: number;
-  revisionCreatedAt: number;
-}
-
-export interface PlanSummary {
-  id: string;
-  author: string;
-  taskId: string | null;
-  sourceHarness: Harness;
-  sourceSessionId: string;
-  revision: number;
-  title: string;
-  contentHash: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface Handoff {
-  id: string;
-  taskId: string;
-  fromAgent: string;
-  toAgent: string;
-  summary: string;
-  context: Record<string, unknown>;
-  status: HandoffStatus;
-  createdAt: number;
-  expiresAt: number;
-  respondedAt: number | null;
-}
-
-export interface CoordinationEvent {
+export interface ChatEvent {
   sequence: number;
-  id: string;
   kind: string;
   actor: string;
-  entityType: string;
-  entityId: string;
+  messageId: string | null;
   payload: Record<string, unknown>;
-  worktreeId?: string | null;
-  member?: string | null;
   createdAt: number;
 }
 
-export interface CoordinationMember {
-  id: string;
-  name: string;
-  repositoryId: string;
-  repositoryName: string;
-  root: string;
-  available: boolean;
-}
-
-export interface CoordinationWorkspace {
-  id: string;
-  name: string;
-  implicit: boolean;
-  currentMemberId: string;
-  currentMember: string;
-}
-
-export interface PolicyDocument {
-  content: string;
-  hash: string;
-  path: string;
-  worktreeId: string;
-  member: string;
-  acknowledgedAt: number | null;
-}
-
-export interface PolicyAcknowledgement {
-  hash: string;
-  worktreeId: string;
-  member: string;
-  acknowledgedAt: number;
-  newlyAcknowledged: boolean;
-}
-
-export interface GitWorktreeContext {
-  root: string;
-  branch: string | null;
-  commit: string | null;
-  detached: boolean;
-  dirty: boolean;
-}
-
-export interface CoordinationSnapshot {
-  workspace: CoordinationWorkspace;
-  members: CoordinationMember[];
-  git: GitWorktreeContext;
+export interface LineStatus {
+  repositoryRoot: string;
+  commonGitDirectory: string;
+  databasePath: string;
   agent: Agent;
   session: Session;
-  sessions: Session[];
   agents: Agent[];
-  tasks: Task[];
-  plans: PlanSummary[];
-  instructions: SharedInstructionSummary[];
-  /** @deprecated Always empty. Path claims are no longer active. */
-  claims: PathClaim[];
   unreadMessages: number;
-  unacknowledgedInstructions: number;
-  pendingHandoffs: number;
-  warnings: CoordinationWarning[];
   lastEventSequence: number;
 }
 
@@ -262,10 +61,5 @@ export interface DoctorReport {
   ok: boolean;
   repositoryRoot: string;
   databasePath: string;
-  sqliteVersion: string;
-  journalMode: string;
-  integrity: string;
-  foreignKeyViolations: number;
-  policyPresent: boolean;
-  warnings: string[];
+  checks: Array<{ name: string; ok: boolean; detail: string }>;
 }

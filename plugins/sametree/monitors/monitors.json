@@ -1,8 +1,0 @@
-[
-  {
-    "name": "sametree-inbox",
-    "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/inbox-monitor.sh\"",
-    "description": "Task-linked peer messages and shared user instructions in this SameTree workspace",
-    "when": "always"
-  }
-]

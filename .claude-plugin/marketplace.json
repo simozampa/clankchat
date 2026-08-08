@@ -1,14 +1,13 @@
 {
-  "name": "sametree",
+  "name": "clankchat",
   "owner": {
-    "name": "SameTree maintainers"
+    "name": "clankchat maintainers"
   },
-  "description": "SameTree coordination integrations for coding agents",
   "plugins": [
     {
-      "name": "sametree",
-      "source": "./plugins/sametree",
-      "description": "Task coordination, shared user instructions, plans, and review delivery for Claude Code"
+      "name": "clankchat",
+      "source": "./plugins/clankchat",
+      "description": "comms for your coding agents"
     }
   ]
 }
