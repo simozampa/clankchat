@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS sessions_agent_expiry ON sessions(agent_name, expires_at);
 
+CREATE TABLE IF NOT EXISTS presence_sessions (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL CHECK (kind IN ('message', 'request', 'reply')),

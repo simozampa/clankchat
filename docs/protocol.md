@@ -29,7 +29,7 @@ Messages are immutable and have:
 - Optional correlation and reply-to IDs.
 - A pinned flag valid only for broadcasts.
 
-A direct recipient must already have joined the line. An ordinary broadcast materializes recipient rows for known agents other than the sender in the same transaction.
+A direct recipient joins on its first session-opening agent command in that repository and must have joined before another agent can send to it. `setup`, `doctor`, and human `watch` do not join an agent. An ordinary broadcast materializes recipient rows for known agents other than the sender in the same transaction.
 
 Read acknowledgement and live delivery are independent. Acknowledgement is idempotent.
 

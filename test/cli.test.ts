@@ -23,7 +23,7 @@ describe('CLI', () => {
       encoding: 'utf8',
     });
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe('0.1.0');
+    expect(result.stdout.trim()).toBe('0.1.1');
   });
 
   it('discovers agents and exchanges messages', () => {
@@ -49,6 +49,20 @@ describe('CLI', () => {
     );
   });
 
+  it('keeps short-lived commands out of the presence stream', () => {
+    const created = repository();
+    repositories.push(created);
+    run(created.root, 'alice', ['status']);
+    run(created.root, 'alice', ['message', 'inbox']);
+    const beforeFollow = run(created.root, 'human', ['watch', '--once']).stdout;
+    expect(beforeFollow).toContain('alice joined the line');
+    expect(beforeFollow).not.toContain('alice came online');
+
+    run(created.root, 'alice', ['message', 'follow', '--once', '--json']);
+    const afterFollow = run(created.root, 'human', ['watch', '--once']).stdout;
+    expect(afterFollow.match(/alice came online/gu)).toHaveLength(1);
+  });
+
   it('waits for a reply in the same command', async () => {
     const created = repository();
     repositories.push(created);
@@ -69,7 +83,7 @@ describe('CLI', () => {
         '--body',
         'Which port?',
         '--await-reply',
-        '--timeout',
+        '--timeout-ms',
         '2000',
       ],
       { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
@@ -90,12 +104,15 @@ describe('CLI', () => {
       requestId = inbox.find((message) => message.kind === 'request')?.id ?? '';
     }
     expect(requestId).not.toBe('');
+    expect(run(created.root, 'alice', ['message', 'follow', '--once', '--json']).status).toBe(0);
     expect(run(created.root, 'bob', ['message', 'reply', requestId, '--body', '8080']).status).toBe(
       0,
     );
     const exit = await exitPromise;
     expect(exit).toBe(0);
     expect(JSON.parse(stdout)).toMatchObject({ reply: { body: '8080', replyTo: requestId } });
+    const watched = run(created.root, 'human', ['watch', '--once']).stdout;
+    expect(watched.match(/alice came online/gu)).toHaveLength(1);
   });
 
   it('releases an awaited reply when interrupted', async () => {
@@ -118,7 +135,7 @@ describe('CLI', () => {
         '--body',
         'Interrupted?',
         '--await-reply',
-        '--timeout',
+        '--timeout-ms',
         '5000',
       ],
       { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },

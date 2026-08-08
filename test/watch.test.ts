@@ -39,6 +39,54 @@ describe('human watch stream', () => {
     alice.close();
   });
 
+  it('announces only offline-to-online presence sessions', () => {
+    const created = repository();
+    repositories.push(created);
+    const first = new ChatLine({
+      cwd: created.root,
+      agent: 'alice',
+    });
+    const overlapping = new ChatLine({
+      cwd: created.root,
+      agent: 'alice',
+    });
+    expect(overlapping.events().filter((event) => event.kind === 'session.started')).toHaveLength(
+      1,
+    );
+    first.close();
+    overlapping.close();
+    const returned = new ChatLine({
+      cwd: created.root,
+      agent: 'alice',
+    });
+    expect(returned.events().filter((event) => event.kind === 'session.started')).toHaveLength(2);
+    returned.close();
+  });
+
+  it('does not announce short-lived agent commands', () => {
+    const created = repository();
+    repositories.push(created);
+    const first = new ChatLine({ cwd: created.root, agent: 'alice', announcePresence: false });
+    first.close();
+    const second = new ChatLine({ cwd: created.root, agent: 'alice', announcePresence: false });
+    expect(second.events().filter((event) => event.kind === 'session.started')).toEqual([]);
+    second.close();
+  });
+
+  it('does not let an overlapping silent session suppress presence', () => {
+    const created = repository();
+    repositories.push(created);
+    const waitingCommand = new ChatLine({
+      cwd: created.root,
+      agent: 'alice',
+      announcePresence: false,
+    });
+    const follower = new ChatLine({ cwd: created.root, agent: 'alice' });
+    expect(follower.events().filter((event) => event.kind === 'session.started')).toHaveLength(1);
+    waitingCommand.close();
+    follower.close();
+  });
+
   it('formats requests, replies, and pinned broadcasts', () => {
     const base = {
       sequence: 1,
