@@ -148,7 +148,9 @@ describe('repository chat line', () => {
     const alice = new ChatLine({ cwd: first.root, agent: 'alice' });
     const other = new ChatLine({ cwd: second.root, agent: 'other' });
     expect(alice.repository.databasePath).not.toBe(other.repository.databasePath);
-    expect(() => alice.send({ to: 'other', body: 'No route.' })).toThrow(/not on this line/u);
+    expect(() => alice.send({ to: 'other', body: 'No route.' })).toThrow(
+      /has not joined this repository line yet; run status, agents, heartbeat, or a message command/u,
+    );
     alice.close();
     other.close();
   });

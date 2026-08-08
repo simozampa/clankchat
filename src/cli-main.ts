@@ -37,10 +37,12 @@ function globalOptions(command: Command): GlobalOptions {
 function openLine(command: Command): ChatLine {
   const options = globalOptions(command);
   const harness = options.harness ?? detectHarness();
+  const announcePresence = command.name() === 'follow' && command.parent?.name() === 'message';
   return new ChatLine({
     cwd: options.cwd,
     agent: options.agent ?? agentIdentity(harness),
     harness,
+    announcePresence,
     ...(process.env.CLANKCHAT_SESSION ? { sessionId: process.env.CLANKCHAT_SESSION } : {}),
   });
 }
@@ -162,7 +164,7 @@ export function buildProgram(signal?: AbortSignal): Command {
     .option('--body <text>', 'message body')
     .option('--body-stdin', 'read the body from stdin')
     .option('--await-reply', 'wait for a correlated reply')
-    .option('--timeout <milliseconds>', 'reply timeout', (value) => Number(value), 30_000)
+    .option('--timeout-ms <milliseconds>', 'reply timeout in milliseconds', Number, 30_000)
     .option('--pinned', 'deliver this broadcast to every future session')
     .option('--source-key <key>', 'stable adapter source identity')
     .action(
@@ -172,7 +174,7 @@ export function buildProgram(signal?: AbortSignal): Command {
           body?: string;
           bodyStdin?: boolean;
           awaitReply?: boolean;
-          timeout: number;
+          timeoutMs: number;
           pinned?: boolean;
           sourceKey?: string;
         },
@@ -186,7 +188,7 @@ export function buildProgram(signal?: AbortSignal): Command {
               await line.requestAndAwait({
                 to: options.to,
                 body: messageBody,
-                timeoutMs: options.timeout,
+                timeoutMs: options.timeoutMs,
                 ...(signal ? { signal } : {}),
               }),
             );

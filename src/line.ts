@@ -155,6 +155,7 @@ export interface LineOptions {
   processId?: number | null;
   sessionId?: string;
   sessionTtlSeconds?: number;
+  announcePresence?: boolean;
   now?: () => number;
 }
 
@@ -166,6 +167,7 @@ export class ChatLine {
   readonly sessionTtlSeconds: number;
   #sessionId: string;
   #resumeSessionId: string | undefined;
+  #announcePresence: boolean;
   #now: () => number;
   #closed = false;
   #reservations = new Map<string, string>();
@@ -176,6 +178,7 @@ export class ChatLine {
     this.agentName = validateAgentName(options.agent);
     this.harness = options.harness ?? 'other';
     this.sessionTtlSeconds = options.sessionTtlSeconds ?? DEFAULT_SESSION_TTL_SECONDS;
+    this.#announcePresence = options.announcePresence ?? true;
     this.#now = options.now ?? Date.now;
     this.#resumeSessionId = options.sessionId;
     this.#sessionId = this.#startSession(options.processId ?? process.pid, options.sessionId);
@@ -205,6 +208,15 @@ export class ChatLine {
       const existing = this.database
         .prepare('SELECT name FROM agents WHERE name = ?')
         .get(this.agentName);
+      const wasOnline = this.database
+        .prepare(
+          `SELECT 1 FROM sessions
+           JOIN presence_sessions ON presence_sessions.session_id = sessions.id
+           WHERE sessions.agent_name = ?
+             AND sessions.closed_at IS NULL AND sessions.expires_at >= ?
+           LIMIT 1`,
+        )
+        .get(this.agentName, now);
       const previousSession = this.database
         .prepare('SELECT agent_name, harness FROM sessions WHERE id = ?')
         .get(sessionId) as { agent_name: string; harness: Harness } | undefined;
@@ -243,6 +255,11 @@ export class ChatLine {
           now,
           now + this.sessionTtlSeconds * 1_000,
         );
+      if (this.#announcePresence) {
+        this.database
+          .prepare('INSERT OR IGNORE INTO presence_sessions(session_id) VALUES (?)')
+          .run(sessionId);
+      }
       if (previousSession) {
         this.database
           .prepare(
@@ -262,7 +279,9 @@ export class ChatLine {
         .run(this.agentName, sessionId);
       if (!existing)
         this.#recordEvent('agent.joined', this.agentName, null, { harness: this.harness });
-      this.#recordEvent('session.started', this.agentName, null, { harness: this.harness });
+      if (this.#announcePresence && !wasOnline) {
+        this.#recordEvent('session.started', this.agentName, null, { harness: this.harness });
+      }
     });
     return sessionId;
   }
@@ -345,7 +364,12 @@ export class ChatLine {
 
   #requireAgent(name: string): void {
     const found = this.database.prepare('SELECT 1 FROM agents WHERE name = ?').get(name);
-    if (!found) throw new ClankChatError('AGENT_NOT_FOUND', `Agent ${name} is not on this line.`);
+    if (!found) {
+      throw new ClankChatError(
+        'AGENT_NOT_FOUND',
+        `Agent ${name} has not joined this repository line yet; run status, agents, heartbeat, or a message command as ${name} first.`,
+      );
+    }
   }
 
   #insertMessage(input: {

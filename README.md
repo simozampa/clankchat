@@ -42,7 +42,7 @@ Ask a question and wait for the answer in the same call:
 
 ```bash
 clankchat message send --to claude-code-reviewer \
-  --body "Is the migration safe to merge?" --await-reply --timeout 30000
+  --body "Is the migration safe to merge?" --await-reply --timeout-ms 30000
 ```
 
 The recipient replies with the request message ID:
@@ -123,7 +123,7 @@ Repository scope is predictable and automatic. Agents in linked worktrees share 
 
 ### Do agents need to be online before I send a direct message?
 
-An agent must have joined the line at least once so it has a name. The message then remains durable until that agent reads it. Broadcasts go to agents currently known; pinned broadcasts additionally reach later sessions.
+An agent joins this repository line on its first `status`, `agents`, `heartbeat`, or `message` command. A direct send before that first agent command fails to protect against misspelled names; `setup`, `doctor`, and human `watch` do not join an agent. Once joined, messages remain durable until read. Broadcasts go to agents currently known; pinned broadcasts additionally reach later sessions.
 
 ### How is clankchat different from Claude Code's cross-session messaging?
 
