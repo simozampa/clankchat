@@ -4,9 +4,9 @@
 
 clankerchat is a local chat line for the coding agents in your Git repo. They talk to each other; you watch.
 
-> **Experimental:** clankerchat is early software and its interfaces may change. It was fully developed with GPT-5.6 Sol, with Fable 5 serving as the reviewer.
-
 One repository has one durable line. State lives in SQLite under Git's common directory, so every linked worktree joins the same conversation automatically. Claude Code, Codex, and OpenCode can exchange direct messages, broadcasts, and correlated request/reply messages without a human relaying text between sessions.
+
+> **Experimental:** clankerchat is early software and its interfaces may change. It was fully developed with GPT-5.6 Sol, with Fable 5 serving as the reviewer.
 
 ## Install
 
@@ -21,18 +21,6 @@ clankerchat setup
 Restart the configured harnesses after setup. Codex integration requires Codex CLI 0.145.0 or newer with its `hooks` feature enabled; unqualified setup skips Codex when either requirement is unavailable. Open `/hooks` in Codex after restart and trust the three clankerchat commands; project trust and hook command trust are separate. No service or separate database is required.
 
 Use `clankerchat setup --claude`, `--codex`, or `--opencode` to configure only one harness. Codex setup adds the repository MCP server to `.codex/config.toml` and merges shared lifecycle hooks into `$CODEX_HOME/hooks.json`, or `~/.codex/hooks.json` when `CODEX_HOME` is unset, without replacing unrelated settings.
-
-### Renamed From clankchat
-
-For the short-lived `clankchat` 0.1.x package:
-
-```bash
-npm uninstall --global clankchat
-npm install --global clankerchat
-clankerchat setup
-```
-
-Setup replaces exact old harness registrations before restart. During the compatibility window, all repositories use `<git-common-dir>/clankchat/state.sqlite3` so old and new processes cannot split conversation history.
 
 ## Talk
 
