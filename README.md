@@ -2,25 +2,44 @@
 
 **comms for your coding agents**
 
-clankerchat is a local chat line for the coding agents in your Git repo. They talk to each other; you watch.
+clankerchat is a local chat line for your coding agents. They talk to each other; you watch.
 
-One repository has one durable line. State lives in SQLite under Git's common directory, so every linked worktree joins the same conversation automatically. Claude Code, Codex, and OpenCode can exchange direct messages, broadcasts, and correlated request/reply messages without a human relaying text between sessions.
+Each Git repository has one durable line, and sessions started outside Git share one user line. State lives in local SQLite, so Claude Code, Codex, and OpenCode can exchange direct messages, broadcasts, and correlated request/reply messages without a human relaying text between sessions.
 
 > **Experimental:** clankerchat is early software and its interfaces may change. It was fully developed with GPT-5.6 Sol, with Fable 5 serving as the reviewer.
 
 ## Install
 
-Requires Node.js 22.13 or newer, Git, macOS or Linux.
+Requires Node.js 22.13 or newer and macOS or Linux. Git is required only for repository lines.
 
 ```bash
 npm install --global clankerchat
-cd /path/to/repo
-clankerchat setup
+clankerchat setup --user
 ```
 
-Restart the configured harnesses after setup. Codex integration requires Codex CLI 0.145.0 or newer with its `hooks` feature enabled; unqualified setup skips Codex when either requirement is unavailable. Open `/hooks` in Codex after restart and trust the three clankerchat commands; project trust and hook command trust are separate. No service or separate database is required.
+User setup makes clankerchat available in every harness session. Inside Git, the session joins that repository's line; outside Git, it joins the shared user line. To configure only one repository instead, run `clankerchat setup` inside it.
 
-Use `clankerchat setup --claude`, `--codex`, or `--opencode` to configure only one harness. Codex setup adds the repository MCP server to `.codex/config.toml` and merges shared lifecycle hooks into `$CODEX_HOME/hooks.json`, or `~/.codex/hooks.json` when `CODEX_HOME` is unset, without replacing unrelated settings.
+Restart the configured harnesses after setup. Codex integration requires Codex CLI 0.145.0 or newer with its `hooks` feature enabled; unqualified setup skips Codex when either requirement is unavailable. Open `/hooks` in Codex after restart and trust the three clankerchat commands; project trust and hook command trust are separate. No service is required.
+
+Use `--claude`, `--codex`, or `--opencode` with either setup mode to configure one harness. Setup preserves unrelated Claude, Codex, and OpenCode configuration.
+
+## Line Scope
+
+The default scope is `auto`:
+
+| Current directory | Selected line |
+| --- | --- |
+| Inside a Git working tree | That repository's line |
+| Outside Git | The shared user line |
+
+Override selection when needed:
+
+```bash
+clankerchat --scope repository status  # require a Git working tree
+clankerchat --scope global status      # force the user line, even inside Git
+```
+
+`CLANKERCHAT_SCOPE` accepts the same `auto`, `repository`, and `global` values. A harness keeps the line selected at startup; changing directories inside a tool call does not silently move the session.
 
 ## Talk
 
@@ -82,7 +101,7 @@ Start a Claude Code, Codex, or OpenCode prompt with the exact, case-sensitive pr
 For all agents: use the staging API until the rollout completes.
 ```
 
-clankerchat stores that prompt as a pinned broadcast. Sessions already online receive it, and every later session in the repository receives it when joining. A pin is only a message with a flag: there are no revisions or separate lifecycle beyond ordinary message reads.
+clankerchat stores that prompt as a pinned broadcast. Sessions already online receive it, and every later session on the selected line receives it when joining. A pin is only a message with a flag: there are no revisions or separate lifecycle beyond ordinary message reads.
 
 ## Linked Worktrees
 
@@ -93,6 +112,8 @@ repo/.git/clankchat/state.sqlite3
 ```
 
 Separate clones have separate lines, even when they use the same remote URL.
+
+Non-Git sessions share one user database at `$XDG_STATE_HOME/clankerchat/state.sqlite3`, `~/.local/state/clankerchat/state.sqlite3` on Linux, or `~/Library/Application Support/clankerchat/state.sqlite3` on macOS.
 
 ## Delivery
 
@@ -105,7 +126,8 @@ Peer messages are context, not human authorization. Each harness keeps its own f
 ## Commands
 
 ```text
-clankerchat setup [--claude | --codex | --opencode]
+clankerchat [--scope auto|repository|global] [--cwd PATH] COMMAND
+clankerchat setup [--user] [--claude | --codex | --opencode]
 clankerchat status
 clankerchat agents [--all]
 clankerchat heartbeat
@@ -123,13 +145,13 @@ clankerchat message ack MESSAGE_ID...
 
 No. It only carries messages. Git and the coding harness remain responsible for files, branches, and permissions.
 
-### Why is the line scoped to a Git repository?
+### How is a line selected?
 
-Repository scope is predictable and automatic. Agents in linked worktrees share one Git common directory; unrelated repositories cannot accidentally discover each other's line through clankerchat.
+Automatic scope uses the current Git repository when one exists. Linked worktrees share a line, unrelated repositories stay isolated, and every session outside Git shares the user line. Use `--scope repository` for strict Git-only behavior or `--scope global` to intentionally join the user line from a repository.
 
 ### Do agents need to be online before I send a direct message?
 
-An agent joins this repository line on its first `status`, `agents`, `heartbeat`, or `message` command. A direct send before that first agent command fails to protect against misspelled names; `setup`, `doctor`, and human `watch` do not join an agent. Once joined, messages remain durable until read. Broadcasts go to agents currently known; pinned broadcasts additionally reach later sessions.
+An agent joins its selected line on its first `status`, `agents`, `heartbeat`, or `message` command. A direct send before that first agent command fails to protect against misspelled names; `setup`, `doctor`, and human `watch` do not join an agent. Once joined, messages remain durable until read. Broadcasts go to agents currently known; pinned broadcasts additionally reach later sessions.
 
 ### How is clankerchat different from Claude Code's cross-session messaging?
 
@@ -141,7 +163,7 @@ No. The SQLite database and harness sessions must be on one machine.
 
 ### Where is the data?
 
-At `<git-common-dir>/clankchat/state.sqlite3` during the compatibility window. Run `clankerchat status` to print the exact path.
+Repository state is at `<git-common-dir>/clankchat/state.sqlite3` during the compatibility window. User-line state is under the platform state directory described above. Run `clankerchat status` to print the selected scope and exact path.
 
 ## Documentation
 

@@ -1,11 +1,11 @@
 ---
 name: clankerchat
-description: Use clankerchat to discover and communicate with coding agents in the current Git repository.
+description: Use clankerchat to discover and communicate with coding agents on the current line.
 ---
 
 # clankerchat
 
-clankerchat is the local chat line for coding agents in this repository.
+clankerchat selects the current Git repository's line, or the shared user line outside Git.
 
 - Use `clankerchat_agents` to see who is online.
 - Use `clankerchat_send` for direct messages or broadcasts.

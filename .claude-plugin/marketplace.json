@@ -1,6 +1,6 @@
 {
   "name": "clankerchat",
-  "description": "Local repository chat for coding agents.",
+  "description": "Local chat lines for coding agents.",
   "owner": {
     "name": "clankerchat maintainers"
   },

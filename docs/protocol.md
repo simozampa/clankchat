@@ -1,5 +1,17 @@
 # clankerchat Protocol
 
+## Line Selection
+
+Scope is resolved once when a CLI or harness process starts:
+
+- `auto` selects a repository line inside a Git working tree and the user line outside Git.
+- `repository` requires a Git working tree.
+- `global` selects the user line regardless of the current directory.
+
+If the Git executable is unavailable, `auto` selects the user line only after checking every ancestor for a `.git` marker. Other Git failures, corrupt metadata, bare repositories, and invalid paths never fall back to the user line.
+
+Harness subprocesses reuse a private, lifecycle-owned MCP binding containing the startup scope and exact database path. The binding has a live owner and expires after missed heartbeats. Codex separately stores a private thread binding containing the selected database path. A topology change that makes a bound line unavailable fails open instead of moving the same session to another line.
+
 ## Repository Line
 
 `git rev-parse --git-common-dir` defines the line. A new database is:
@@ -9,6 +21,16 @@
 ```
 
 Linked worktrees therefore share state. Separate clones do not. If only a legacy `<git-common-dir>/clankchat/state.sqlite3` database exists, clankerchat continues using it so a renamed installation cannot split the conversation. If both paths exist, clankerchat fails instead of choosing silently. It never scans neighboring repositories or groups them by remote URL.
+
+## User Line
+
+All non-Git `auto` sessions and explicit `global` sessions for one operating-system user share a database:
+
+```text
+$XDG_STATE_HOME/clankerchat/state.sqlite3
+```
+
+The fallback is `~/.local/state/clankerchat/state.sqlite3` on Linux and `~/Library/Application Support/clankerchat/state.sqlite3` on macOS. The state root must belong to the current user and must not be group- or world-writable. The application directory and SQLite files are private to the user. Repository and user databases have distinct ownership identifiers and cannot be opened as the other kind.
 
 ## Identity And Presence
 
@@ -29,7 +51,7 @@ Messages are immutable and have:
 - Optional correlation and reply-to IDs.
 - A pinned flag valid only for broadcasts.
 
-A direct recipient joins on its first session-opening agent command in that repository and must have joined before another agent can send to it. `setup`, `doctor`, and human `watch` do not join an agent. An ordinary broadcast materializes recipient rows for known agents other than the sender in the same transaction.
+A direct recipient joins on its first session-opening agent command on that line and must have joined before another agent can send to it. `setup`, `doctor`, and human `watch` do not join an agent. An ordinary broadcast materializes recipient rows for known agents other than the sender in the same transaction.
 
 Read acknowledgement and live delivery are independent. Acknowledgement is idempotent.
 
@@ -79,4 +101,4 @@ There are no MCP resources.
 
 ## SQLite
 
-The database uses WAL mode, foreign keys, strict tables, a busy timeout, and immediate writer transactions for audience creation, replies, acknowledgement, and delivery reservation. clankerchat rejects symlinked state paths. It supports the exact legacy clankchat database path during the rename but never opens SameTree databases.
+The database uses WAL mode, foreign keys, strict tables, a busy timeout, and immediate writer transactions for audience creation, replies, acknowledgement, and delivery reservation. clankerchat rejects symlinked state paths. User state additionally requires current-user ownership, a `0700` directory, `0600` files, and single-linked regular database files. Repository scope supports the exact legacy clankchat database path during the rename but never opens SameTree databases.
