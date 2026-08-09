@@ -1,4 +1,20 @@
 export { agentIdentity, detectHarness } from './activity.js';
+export {
+  CODEX_HOOKS,
+  CODEX_MINIMUM_VERSION,
+  CODEX_PROJECT_BLOCK,
+  codexAgentIdentity,
+  codexHooksConfigured,
+  codexHooksFeatureEnabled,
+  codexMcpRegistrationConfigured,
+  codexProjectConfigured,
+  codexVersion,
+  codexVersionSupported,
+  formatCodexMessage,
+  handleCodexHook,
+  inspectCodexProject,
+  isCodexHookEvent,
+} from './codex.js';
 export { assertDatabaseRuntimeCompatible, immediateTransaction, openDatabase } from './database.js';
 export { doctor } from './doctor.js';
 export { ClankChatError, errorResult, isClankChatError } from './errors.js';

@@ -10,7 +10,7 @@ clankchat is for trusted processes running as one operating-system user on one m
 
 Any process with access to the repository's Git common directory can read or alter the SQLite database. Agent names are cooperative identities. A process can invoke the CLI directly, forge a name, or modify generated integration files.
 
-Peer messages never grant harness permissions. Claude Code and OpenCode apply their own command, filesystem, and network controls when reacting to a message.
+Peer messages never grant harness permissions. Claude Code, Codex, and OpenCode apply their own command, filesystem, and network controls when reacting to a message.
 
 ## Data
 
@@ -20,6 +20,8 @@ Keep the database on a local filesystem. Network and cloud-synchronized filesyst
 
 ## Integrations
 
-Prompt capture and live delivery fail open. An integration error may delay or duplicate a message, but it must never block normal harness operation. OpenCode uses stable delivery metadata to reduce duplicates across retries. A process crash at a transport boundary can still make universal exactly-once model observation impossible.
+Prompt capture and delivery fail open. An integration error may delay or duplicate a message, but it must never block normal harness operation. OpenCode uses stable delivery metadata to reduce duplicates across retries. A process crash at a transport boundary can still make universal exactly-once model observation impossible.
 
-Setup refuses symlinked generated paths and preserves unrelated JSONC configuration while removing exact stale branded entries.
+Codex hooks run outside the Codex sandbox. Review clankchat hook command hashes through Codex `/hooks`; setup does not grant command trust. Codex delivery occurs only at lifecycle boundaries and has no persistence acknowledgement callback.
+
+Setup refuses symlinked generated paths and preserves unrelated JSONC, JSON, and TOML configuration while removing exact stale branded entries.

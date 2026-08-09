@@ -13,7 +13,7 @@ describe('package metadata', () => {
     const plugin = json('plugins/clankchat/.claude-plugin/plugin.json');
     expect(metadata).toMatchObject({
       name: 'clankchat',
-      version: '0.1.1',
+      version: '0.1.2',
       description: 'comms for your coding agents',
       bin: { clankchat: 'dist/cli.js', 'clankchat-mcp': 'dist/mcp.js' },
     });
@@ -23,6 +23,7 @@ describe('package metadata', () => {
       'agents',
       'comms',
       'claude-code',
+      'codex',
       'opencode',
       'mcp',
       'mcp-server',

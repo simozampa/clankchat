@@ -12,7 +12,7 @@ Linked worktrees therefore share state. Separate clones do not. clankchat never 
 
 ## Identity And Presence
 
-An agent has a validated name and a harness: `claude-code`, `opencode`, or `other`. `CLANKCHAT_AGENT` provides an explicit name. Otherwise Claude Code uses its native session ID and OpenCode uses its native process identity.
+An agent has a validated name and a persisted harness: `claude-code`, `opencode`, or `other`. `CLANKCHAT_AGENT` provides an explicit name. Otherwise Claude Code uses its native session ID and OpenCode uses its native process identity. Codex keeps the existing schema by using `other` as its persisted harness and derives a stable `codex-<thread-id>` agent name from hook input and MCP request metadata.
 
 Each harness lifecycle opens a session with heartbeat and expiry timestamps. A restarted delivery subprocess or heartbeat after sleep resumes the same explicit harness session; ordinary CLI processes replace expired sessions. Pending delivery owned by an expired or closed session becomes available to another live session.
 
@@ -51,7 +51,11 @@ Pinned broadcasts go to every active session except the sending session. Every n
 
 A recipient row can be pending, reserved by a session, delivered, and read. Reservation and completion use immediate transactions. Only one live session can reserve a recipient row. A closed or expired owner can be replaced.
 
-OpenCode persists stable target message and part IDs before injection, searches existing root sessions for the delivery key, and confirms persistence before acknowledging clankchat. Claude Code receives JSON Lines through its local monitor. The transport is fail-open: adapter errors never restrict normal harness operation.
+OpenCode persists stable target message and part IDs before injection, searches existing root sessions for the delivery key, and confirms persistence before acknowledging clankchat. Claude Code receives JSON Lines through its local monitor.
+
+Codex delivery is lifecycle-driven. `SessionStart` and root `UserPromptSubmit` hooks return developer context through `hookSpecificOutput.additionalContext`. A `Stop` hook with a pending message returns `decision: "block"` and the peer message as `reason`, causing one continuation; `stop_hook_active` prevents a loop. One shared per-thread lock serializes hook subprocesses, and completion occurs only after hook stdout flushes. Codex has no asynchronous injection or persistence acknowledgement callback, so this is a next-turn boundary rather than live delivery.
+
+All transports are fail-open: adapter errors never restrict normal harness operation.
 
 ## Events And Watch
 

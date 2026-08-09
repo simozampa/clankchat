@@ -1,7 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { CODEX_PROJECT_BLOCK } from '../src/codex.js';
 import { repository, type TestRepository } from './helpers.js';
 
 const repositories: TestRepository[] = [];
@@ -23,7 +26,7 @@ describe('CLI', () => {
       encoding: 'utf8',
     });
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe('0.1.1');
+    expect(result.stdout.trim()).toBe('0.1.2');
   });
 
   it('discovers agents and exchanges messages', () => {
@@ -61,6 +64,40 @@ describe('CLI', () => {
     run(created.root, 'alice', ['message', 'follow', '--once', '--json']);
     const afterFollow = run(created.root, 'human', ['watch', '--once']).stdout;
     expect(afterFollow.match(/alice came online/gu)).toHaveLength(1);
+  });
+
+  it('implements the fail-open Codex stdin/stdout hook contract', () => {
+    const created = repository();
+    repositories.push(created);
+    mkdirSync(path.join(created.root, '.codex'), { recursive: true });
+    writeFileSync(path.join(created.root, '.codex', 'config.toml'), `${CODEX_PROJECT_BLOCK}\n`);
+    const input = JSON.stringify({
+      session_id: 'cli-session',
+      transcript_path: null,
+      cwd: created.root,
+      hook_event_name: 'SessionStart',
+      source: 'startup',
+      model: 'gpt-5.6',
+      permission_mode: 'default',
+    });
+    const result = spawnSync(
+      process.execPath,
+      ['dist/cli.js', 'hook', 'codex', '--event', 'SessionStart'],
+      { cwd: process.cwd(), encoding: 'utf8', input },
+    );
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'SessionStart' },
+    });
+
+    const malformed = spawnSync(
+      process.execPath,
+      ['dist/cli.js', 'hook', 'codex', '--event', 'SessionStart'],
+      { cwd: process.cwd(), encoding: 'utf8', input: '{' },
+    );
+    expect(malformed.status).toBe(0);
+    expect(malformed.stdout).toBe('');
+    expect(malformed.stderr).toBe('');
   });
 
   it('waits for a reply in the same command', async () => {
