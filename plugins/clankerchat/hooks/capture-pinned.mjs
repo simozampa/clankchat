@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 
 // Chat awareness must never prevent Claude from accepting a user prompt.
-const executable = process.env.CLANKCHAT_BIN || 'clankchat';
+const executable = process.env.CLANKERCHAT_BIN || process.env.CLANKCHAT_BIN || 'clankerchat';
 const script = /\.[cm]?js$/iu.test(executable);
 const command = script ? process.execPath : executable;
 const args = [...(script ? [executable] : []), '--harness', 'claude-code', 'message', 'capture'];
 const env = {
   ...process.env,
-  CLANKCHAT_CWD: process.env.CLAUDE_PROJECT_DIR || process.cwd(),
+  CLANKERCHAT_CWD: process.env.CLAUDE_PROJECT_DIR || process.cwd(),
 };
 
 try {

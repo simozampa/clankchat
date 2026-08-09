@@ -5,8 +5,9 @@ function safe(value: string): string {
 }
 
 export function detectHarness(environment: NodeJS.ProcessEnv = process.env): Harness {
-  if (environment.CLANKCHAT_HARNESS === 'claude-code') return 'claude-code';
-  if (environment.CLANKCHAT_HARNESS === 'opencode') return 'opencode';
+  const configured = environment.CLANKERCHAT_HARNESS ?? environment.CLANKCHAT_HARNESS;
+  if (configured === 'claude-code') return 'claude-code';
+  if (configured === 'opencode') return 'opencode';
   if (environment.CLAUDE_CODE_SESSION_ID) return 'claude-code';
   if (environment.OPENCODE_PID) return 'opencode';
   return 'other';
@@ -16,7 +17,9 @@ export function agentIdentity(
   harness = detectHarness(),
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  if (environment.CLANKCHAT_AGENT) return environment.CLANKCHAT_AGENT;
+  if (environment.CLANKERCHAT_AGENT ?? environment.CLANKCHAT_AGENT) {
+    return environment.CLANKERCHAT_AGENT ?? String(environment.CLANKCHAT_AGENT);
+  }
   const native =
     harness === 'claude-code'
       ? environment.CLAUDE_CODE_SESSION_ID

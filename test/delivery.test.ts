@@ -126,13 +126,15 @@ describe('live delivery', () => {
       pinned: false,
     });
     expect(prompt).toContain('Reply-To: message-1');
-    expect(prompt).toContain('Reply with clankchat_reply using that messageId');
+    expect(prompt).toContain('Reply with clankerchat_reply using that messageId');
     expect(prompt).toContain('Correlation: correlation-1');
     expect(prompt).toContain('peer context');
   });
 
   it('keeps stable OpenCode delivery metadata in the generated adapter', () => {
+    expect(OPENCODE_TUI_PLUGIN).toContain('clankerchatDeliveryKey');
     expect(OPENCODE_TUI_PLUGIN).toContain('clankchatDeliveryKey');
+    expect(OPENCODE_TUI_PLUGIN).toContain('clankchat.delivery.');
     expect(OPENCODE_TUI_PLUGIN).toContain('message.deliveryScope');
     expect(OPENCODE_TUI_PLUGIN).toContain('await persisted');
     expect(OPENCODE_TUI_PLUGIN).toContain('ack-stdin');
@@ -176,7 +178,7 @@ describe('live delivery', () => {
     });
     Reflect.set(globalThis, 'Bun', {
       spawn: (_args: unknown, options: { env: Record<string, string> }) => {
-        spawnedSession = options.env.CLANKCHAT_SESSION ?? '';
+        spawnedSession = options.env.CLANKERCHAT_SESSION ?? '';
         return {
           stdout,
           stdin: {
@@ -242,8 +244,8 @@ describe('live delivery', () => {
       parts: [
         expect.objectContaining({
           metadata: {
-            clankchatDeliveryKey: 'message-1:session-1',
-            clankchatMessageID: 'message-1',
+            clankerchatDeliveryKey: 'message-1:session-1',
+            clankerchatMessageID: 'message-1',
           },
         }),
       ],

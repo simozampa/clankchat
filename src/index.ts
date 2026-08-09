@@ -17,7 +17,13 @@ export {
 } from './codex.js';
 export { assertDatabaseRuntimeCompatible, immediateTransaction, openDatabase } from './database.js';
 export { doctor } from './doctor.js';
-export { ClankChatError, errorResult, isClankChatError } from './errors.js';
+export {
+  ClankChatError,
+  ClankerChatError,
+  errorResult,
+  isClankChatError,
+  isClankerChatError,
+} from './errors.js';
 export { resolveRepository } from './git.js';
 export { ChatLine, ChatObserver, validateAgentName } from './line.js';
 export { setup } from './setup.js';

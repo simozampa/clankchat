@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { handleCodexHook } from '../src/codex.js';
+import { handleCodexHook, LEGACY_CODEX_PROJECT_BLOCK } from '../src/codex.js';
 import { doctor } from '../src/doctor.js';
 import { resolveRepository } from '../src/git.js';
 import { ChatLine } from '../src/line.js';
@@ -25,7 +25,7 @@ afterEach(() => {
 function fixture(): { root: string; home: string } {
   const created = repository();
   repositories.push(created);
-  const home = mkdtempSync(path.join(tmpdir(), 'clankchat-codex-home-'));
+  const home = mkdtempSync(path.join(tmpdir(), 'clankerchat-codex-home-'));
   homes.push(home);
   setup({
     cwd: created.root,
@@ -78,7 +78,7 @@ describe('Codex hooks', () => {
     expect(JSON.parse(started[0] ?? '{}')).toMatchObject({
       hookSpecificOutput: {
         hookEventName: 'SessionStart',
-        additionalContext: expect.stringContaining('clankchat_*'),
+        additionalContext: expect.stringContaining('clankerchat_*'),
       },
     });
 
@@ -197,8 +197,7 @@ describe('Codex hooks', () => {
     const { root } = fixture();
     const digest = createHash('sha256').update('session-one').digest('hex').slice(0, 24);
     const lockPath = path.join(
-      resolveRepository(root).commonGitDirectory,
-      'clankchat',
+      path.dirname(resolveRepository(root).databasePath),
       `codex-${digest}.lock`,
     );
     writeFileSync(lockPath, '');
@@ -211,6 +210,13 @@ describe('Codex hooks', () => {
       outputFor(root, 'SessionStart'),
     ]);
     expect(contenders.filter((output) => output.length > 0)).toHaveLength(1);
+
+    writeFileSync(lockPath, '');
+    writeFileSync(`${lockPath}.recover`, '');
+    const expiredRecovery = new Date(Date.now() - 70_000);
+    utimesSync(lockPath, expiredRecovery, expiredRecovery);
+    utimesSync(`${lockPath}.recover`, expiredRecovery, expiredRecovery);
+    await expect(outputFor(root, 'SessionStart')).resolves.toHaveLength(1);
   });
 
   it('fails open for malformed, mismatched, unconfigured, and subagent input', async () => {
@@ -234,6 +240,22 @@ describe('Codex hooks', () => {
       },
     });
     expect(output).toEqual([]);
+  });
+
+  it('keeps shared replacement hooks compatible with exact legacy project config', async () => {
+    fixture();
+    const legacy = repository();
+    repositories.push(legacy);
+    mkdirSync(path.join(legacy.root, '.codex'), { recursive: true });
+    writeFileSync(
+      path.join(legacy.root, '.codex', 'config.toml'),
+      `${LEGACY_CODEX_PROJECT_BLOCK}\n`,
+    );
+
+    const output = await outputFor(legacy.root, 'SessionStart');
+    expect(JSON.parse(output[0] ?? '{}')).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'SessionStart' },
+    });
   });
 
   it('reports Codex version, MCP, shared hooks, and the manual trust boundary', () => {
@@ -279,6 +301,6 @@ describe('Codex hooks', () => {
     const output = await outputFor(root, 'UserPromptSubmit', { prompt: 'Continue.' });
     const context = JSON.parse(output[0] ?? '{}').hookSpecificOutput.additionalContext as string;
     expect(context).toContain(`Reply-To: ${request.id}`);
-    expect(context).toContain('clankchat_reply');
+    expect(context).toContain('clankerchat_reply');
   });
 });

@@ -19,14 +19,14 @@ describe('MCP server', () => {
   it('uses Codex request metadata for the same identity as hooks', async () => {
     const createdRepository = repository();
     repositories.push(createdRepository);
-    vi.stubEnv('CLANKCHAT_CODEX', '1');
+    vi.stubEnv('CLANKERCHAT_CODEX', '1');
     const created = createMcpServer({ cwd: createdRepository.root });
     const client = new Client({ name: 'test', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([created.server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const status = await client.callTool({
-        name: 'clankchat_status',
+        name: 'clankerchat_status',
         arguments: {},
         _meta: { threadId: 'session-one' },
       });
@@ -39,7 +39,7 @@ describe('MCP server', () => {
       lines.push(sender);
       const request = sender.request({ to: 'codex-session-one', body: 'Which port?' });
       const reply = await client.callTool({
-        name: 'clankchat_reply',
+        name: 'clankerchat_reply',
         arguments: { messageId: request.id, body: '8080' },
         _meta: { threadId: 'session-one' },
       });
@@ -56,13 +56,13 @@ describe('MCP server', () => {
   it('does not create a fallback Codex identity without thread metadata', async () => {
     const createdRepository = repository();
     repositories.push(createdRepository);
-    vi.stubEnv('CLANKCHAT_CODEX', '1');
+    vi.stubEnv('CLANKERCHAT_CODEX', '1');
     const created = createMcpServer({ cwd: createdRepository.root });
     const client = new Client({ name: 'test', version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([created.server.connect(serverTransport), client.connect(clientTransport)]);
     try {
-      const status = await client.callTool({ name: 'clankchat_status', arguments: {} });
+      const status = await client.callTool({ name: 'clankerchat_status', arguments: {} });
       expect(status.isError).toBe(true);
       const observer = new ChatLine({ cwd: createdRepository.root, agent: 'observer' });
       lines.push(observer);

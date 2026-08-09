@@ -1,0 +1,10 @@
+{
+  "name": "clankerchat",
+  "displayName": "clankerchat",
+  "version": "0.1.0",
+  "description": "comms for your coding agents",
+  "author": {
+    "name": "clankerchat maintainers"
+  },
+  "license": "MIT"
+}

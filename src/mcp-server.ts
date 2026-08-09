@@ -10,6 +10,7 @@ import type { Harness } from './types.js';
 import { VERSION } from './version.js';
 
 const outputSchema = { result: z.unknown() };
+const MAX_CODEX_THREADS = 32;
 
 interface ToolExtra {
   signal: AbortSignal;
@@ -28,11 +29,17 @@ export function createMcpServer(
   options: { cwd?: string; agent?: string; harness?: Harness } = {},
 ): { close: () => void; server: McpServer } {
   const cwd =
-    options.cwd ?? process.env.CLANKCHAT_CWD ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+    options.cwd ??
+    process.env.CLANKERCHAT_CWD ??
+    process.env.CLANKCHAT_CWD ??
+    process.env.CLAUDE_PROJECT_DIR ??
+    process.cwd();
   const harness = options.harness ?? detectHarness();
-  const codex = process.env.CLANKCHAT_CODEX === '1' && options.agent === undefined;
+  const codex =
+    (process.env.CLANKERCHAT_CODEX === '1' || process.env.CLANKCHAT_CODEX === '1') &&
+    options.agent === undefined;
   const lines = new Map<string, ChatLine>();
-  const server = new McpServer({ name: 'clankchat', version: VERSION });
+  const server = new McpServer({ name: 'clankerchat', version: VERSION });
 
   function lineFor(extra: ToolExtra): ChatLine {
     const threadId = extra._meta?.threadId;
@@ -44,6 +51,9 @@ export function createMcpServer(
     const key = codexAgent ? `codex:${codexAgent}` : 'default';
     const existing = lines.get(key);
     if (existing) return existing;
+    if (lines.size >= MAX_CODEX_THREADS) {
+      throw new Error('This clankerchat MCP server has reached its Codex thread limit.');
+    }
     const line = new ChatLine({
       cwd,
       agent: codexAgent ?? options.agent ?? agentIdentity(harness),
@@ -75,9 +85,9 @@ export function createMcpServer(
   }
 
   server.registerTool(
-    'clankchat_send',
+    'clankerchat_send',
     {
-      title: 'Send a clankchat message',
+      title: 'Send a clankerchat message',
       description:
         'Send directly to one agent or broadcast on this repository line. Optionally wait for a correlated reply.',
       inputSchema: {
@@ -85,11 +95,10 @@ export function createMcpServer(
         to: z.string().min(1).max(80).optional(),
         awaitReply: z.boolean().optional(),
         timeoutMs: z.number().int().min(1).max(3_600_000).optional(),
-        pinned: z.boolean().optional(),
       },
       outputSchema,
     },
-    ({ body, to, awaitReply, timeoutMs, pinned }, extra) => {
+    ({ body, to, awaitReply, timeoutMs }, extra) => {
       if (awaitReply) {
         return executeAsync(extra, async (line) => {
           if (!to) throw new Error('awaitReply requires a direct recipient.');
@@ -105,16 +114,15 @@ export function createMcpServer(
         line.send({
           body,
           ...(to ? { to } : {}),
-          ...(pinned ? { pinned: true } : {}),
         }),
       );
     },
   );
 
   server.registerTool(
-    'clankchat_reply',
+    'clankerchat_reply',
     {
-      title: 'Reply to a clankchat request',
+      title: 'Reply to a clankerchat request',
       description: 'Reply to a direct request using the request message ID.',
       inputSchema: {
         messageId: z.string().min(1).max(100),
@@ -127,9 +135,9 @@ export function createMcpServer(
   );
 
   server.registerTool(
-    'clankchat_inbox',
+    'clankerchat_inbox',
     {
-      title: 'Read clankchat messages',
+      title: 'Read clankerchat messages',
       description: 'Read direct messages and broadcasts for this agent.',
       inputSchema: {
         unreadOnly: z.boolean().optional(),
@@ -148,9 +156,9 @@ export function createMcpServer(
   );
 
   server.registerTool(
-    'clankchat_ack',
+    'clankerchat_ack',
     {
-      title: 'Mark clankchat messages read',
+      title: 'Mark clankerchat messages read',
       description: 'Idempotently mark messages read by this agent.',
       inputSchema: { messageIds: z.array(z.string().min(1).max(100)).min(1).max(1_000) },
       outputSchema,
@@ -161,7 +169,7 @@ export function createMcpServer(
   );
 
   server.registerTool(
-    'clankchat_agents',
+    'clankerchat_agents',
     {
       title: 'List agents on this line',
       description: 'List agent names, harnesses, online state, and last-seen times.',
@@ -174,9 +182,9 @@ export function createMcpServer(
   );
 
   server.registerTool(
-    'clankchat_status',
+    'clankerchat_status',
     {
-      title: 'Show clankchat status',
+      title: 'Show clankerchat status',
       description: 'Show this repository line, current identity, agents, and unread count.',
       outputSchema,
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -185,9 +193,9 @@ export function createMcpServer(
   );
 
   server.registerTool(
-    'clankchat_heartbeat',
+    'clankerchat_heartbeat',
     {
-      title: 'Renew clankchat session',
+      title: 'Renew clankerchat session',
       description: 'Renew this agent session after idle time or system sleep.',
       outputSchema,
       annotations: { idempotentHint: true },

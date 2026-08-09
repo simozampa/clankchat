@@ -15,7 +15,7 @@ Unacceptable behavior includes harassment, discrimination, personal attacks, thr
 
 ## Enforcement
 
-For ordinary moderation, open an issue without including sensitive personal details. For a confidential report, use [GitHub private reporting](https://github.com/simozampa/clankchat/security/advisories/new) and begin the title with `Conduct report`. Reports will be reviewed promptly and handled as confidentially as practical.
+For ordinary moderation, open an issue without including sensitive personal details. For a confidential report, use [GitHub private reporting](https://github.com/simozampa/clankerchat/security/advisories/new) and begin the title with `Conduct report`. Reports will be reviewed promptly and handled as confidentially as practical.
 
 Maintainers may edit, remove, or reject comments, commits, issues, and other contributions that violate this standard. They may temporarily or permanently ban participants for behavior that is harmful to the project or its community.
 

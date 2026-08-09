@@ -3,8 +3,9 @@ import { describe, expect, it } from 'vitest';
 import { agentIdentity, detectHarness } from '../src/activity.js';
 
 describe('agent identity', () => {
-  it('uses an explicit clankchat name', () => {
-    expect(agentIdentity('opencode', { CLANKCHAT_AGENT: 'named-agent' })).toBe('named-agent');
+  it('uses an explicit clankerchat name', () => {
+    expect(agentIdentity('opencode', { CLANKERCHAT_AGENT: 'named-agent' })).toBe('named-agent');
+    expect(agentIdentity('opencode', { CLANKCHAT_AGENT: 'legacy-agent' })).toBe('legacy-agent');
   });
 
   it('derives Claude identity from its native session', () => {
@@ -17,5 +18,9 @@ describe('agent identity', () => {
     const environment = { OPENCODE_PID: '999999999' };
     expect(detectHarness(environment)).toBe('opencode');
     expect(agentIdentity('opencode', environment)).toBe('opencode-999999999');
+  });
+
+  it('accepts the legacy harness environment during migration', () => {
+    expect(detectHarness({ CLANKCHAT_HARNESS: 'opencode' })).toBe('opencode');
   });
 });

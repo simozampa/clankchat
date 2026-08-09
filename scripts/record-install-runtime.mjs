@@ -1,8 +1,0 @@
-#!/usr/bin/env node
-
-import { writeFileSync } from 'node:fs';
-
-writeFileSync(
-  new URL('../.clankchat-install-runtime.json', import.meta.url),
-  `${JSON.stringify({ runtime: process.execPath, abi: process.versions.modules }, null, 2)}\n`,
-);

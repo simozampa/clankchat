@@ -58,9 +58,15 @@ export function doctor(cwd = process.cwd(), options: DoctorOptions = {}): Doctor
   const repository = resolveRepository(cwd);
   const database = openDatabase(repository.databasePath);
   try {
-    const integrity = String(database.pragma('integrity_check', { simple: true }));
-    const foreignKeys = database.pragma('foreign_key_check') as unknown[];
-    const journal = String(database.pragma('journal_mode', { simple: true }));
+    const integrityRow = database.prepare('PRAGMA integrity_check').get() as
+      | { integrity_check: string }
+      | undefined;
+    const integrity = integrityRow?.integrity_check ?? 'missing';
+    const foreignKeys = database.prepare('PRAGMA foreign_key_check').all();
+    const journalRow = database.prepare('PRAGMA journal_mode').get() as
+      | { journal_mode: string }
+      | undefined;
+    const journal = journalRow?.journal_mode ?? 'missing';
     const checks: DoctorReport['checks'] = [
       { name: 'integrity', ok: integrity === 'ok', detail: integrity },
       { name: 'foreign-keys', ok: foreignKeys.length === 0, detail: `${foreignKeys.length}` },

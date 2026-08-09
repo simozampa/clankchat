@@ -3,9 +3,10 @@ dist/
 coverage/
 *.log
 .DS_Store
+.clankerchat-install-runtime.json
 .clankchat-install-runtime.json
 
-# clankchat's live database belongs to Git, but keep test fixtures and accidental
+# clankerchat's live database belongs to Git, but keep test fixtures and accidental
 # local copies out of commits too.
 *.sqlite
 *.sqlite-shm

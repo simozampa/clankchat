@@ -10,7 +10,7 @@ if (
   !('version' in metadata) ||
   typeof metadata.version !== 'string'
 ) {
-  throw new Error('clankchat package metadata has no version.');
+  throw new Error('clankerchat package metadata has no version.');
 }
 
 export const VERSION = metadata.version;

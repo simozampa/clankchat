@@ -1,11 +1,7 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { writeSync } from 'node:fs';
 
 import { errorResult } from './errors.js';
-import { runWithInstallRuntime } from './runtime.js';
-
-const relaunched = await runWithInstallRuntime();
-if (relaunched !== null) process.exit(relaunched);
 
 try {
   const { runMcp } = await import('./mcp-server.js');

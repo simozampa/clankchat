@@ -26,7 +26,7 @@ describe('CLI', () => {
       encoding: 'utf8',
     });
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe('0.1.2');
+    expect(result.stdout.trim()).toBe('0.1.0');
   });
 
   it('discovers agents and exchanges messages', () => {

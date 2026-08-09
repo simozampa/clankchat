@@ -1,16 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import type Database from 'better-sqlite3';
-
-import { immediateTransaction, openDatabase } from './database.js';
-import { ClankChatError } from './errors.js';
+import { type ChatDatabase, immediateTransaction, openDatabase } from './database.js';
+import { ClankerChatError } from './errors.js';
 import { type RepositoryContext, resolveRepository } from './git.js';
 import type { Agent, ChatEvent, Harness, LineStatus, Message, Session } from './types.js';
 
 const DEFAULT_SESSION_TTL_SECONDS = 90;
 const DEFAULT_REPLY_TIMEOUT_MS = 30_000;
 const MAX_BODY_LENGTH = 50_000;
+const MAX_MESSAGE_BYTES = 50 * 1_024 * 1_024;
+const MAX_MESSAGES = 10_000;
+const MAX_PINS = 100;
+const MAX_SESSIONS = 100_000;
+const SESSION_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 interface AgentRow {
   name: string;
@@ -67,14 +70,14 @@ function identifier(prefix: string): string {
 
 function bounded(value: string, name: string, maximum = MAX_BODY_LENGTH): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > maximum) {
-    throw new ClankChatError('INVALID_INPUT', `${name} must contain 1-${maximum} characters.`);
+    throw new ClankerChatError('INVALID_INPUT', `${name} must contain 1-${maximum} characters.`);
   }
   return value;
 }
 
 function replyTimeout(value: number): number {
   if (!Number.isInteger(value) || value < 1 || value > 3_600_000) {
-    throw new ClankChatError('INVALID_INPUT', 'Reply timeout must be 1-3600000 milliseconds.');
+    throw new ClankerChatError('INVALID_INPUT', 'Reply timeout must be 1-3600000 milliseconds.');
   }
   return value;
 }
@@ -82,7 +85,7 @@ function replyTimeout(value: number): number {
 export function validateAgentName(value: string): string {
   const name = bounded(value.trim(), 'Agent name', 80);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(name)) {
-    throw new ClankChatError(
+    throw new ClankerChatError(
       'INVALID_INPUT',
       'Agent names may contain letters, numbers, dots, underscores, and hyphens.',
     );
@@ -161,7 +164,7 @@ export interface LineOptions {
 
 export class ChatLine {
   readonly repository: RepositoryContext;
-  readonly database: Database.Database;
+  readonly database: ChatDatabase;
   readonly agentName: string;
   readonly harness: Harness;
   readonly sessionTtlSeconds: number;
@@ -205,6 +208,24 @@ export class ChatLine {
     const now = this.#now();
     const sessionId = preferredId ? bounded(preferredId, 'Session ID', 120) : identifier('session');
     immediateTransaction(this.database, () => {
+      const sessionCutoff = now - SESSION_RETENTION_MS;
+      this.database
+        .prepare(
+          `DELETE FROM message_recipients
+           WHERE scope IN (SELECT id FROM sessions WHERE closed_at IS NOT NULL AND closed_at < ?)`,
+        )
+        .run(sessionCutoff);
+      this.database
+        .prepare('DELETE FROM sessions WHERE closed_at IS NOT NULL AND closed_at < ?')
+        .run(sessionCutoff);
+      const sessionUsage = this.database
+        .prepare('SELECT COUNT(*) AS count FROM sessions')
+        .get() as {
+        count: number;
+      };
+      if (!preferredId && sessionUsage.count >= MAX_SESSIONS) {
+        throw new ClankerChatError('DATABASE_ERROR', 'The repository session quota is exhausted.');
+      }
       const existing = this.database
         .prepare('SELECT name FROM agents WHERE name = ?')
         .get(this.agentName);
@@ -224,7 +245,7 @@ export class ChatLine {
         previousSession &&
         (previousSession.agent_name !== this.agentName || previousSession.harness !== this.harness)
       ) {
-        throw new ClankChatError('MESSAGE_CONFLICT', 'The session ID belongs to another agent.');
+        throw new ClankerChatError('MESSAGE_CONFLICT', 'The session ID belongs to another agent.');
       }
       this.database
         .prepare(
@@ -287,7 +308,7 @@ export class ChatLine {
   }
 
   #ensureOpen(): void {
-    if (this.#closed) throw new ClankChatError('SESSION_EXPIRED', 'This chat line is closed.');
+    if (this.#closed) throw new ClankerChatError('SESSION_EXPIRED', 'This chat line is closed.');
   }
 
   heartbeat(): Session {
@@ -300,7 +321,7 @@ export class ChatLine {
          WHERE id = ? AND closed_at IS NULL AND expires_at >= ?`,
       )
       .run(now, now + this.sessionTtlSeconds * 1_000, this.#sessionId, now);
-    if (result.changes === 0) {
+    if (Number(result.changes) === 0) {
       this.#sessionId = this.#startSession(process.pid, this.#resumeSessionId);
     }
     this.database
@@ -313,7 +334,8 @@ export class ChatLine {
     const row = this.database.prepare('SELECT * FROM sessions WHERE id = ?').get(this.#sessionId) as
       | SessionRow
       | undefined;
-    if (!row) throw new ClankChatError('SESSION_EXPIRED', 'The current session no longer exists.');
+    if (!row)
+      throw new ClankerChatError('SESSION_EXPIRED', 'The current session no longer exists.');
     return toSession(row);
   }
 
@@ -358,14 +380,14 @@ export class ChatLine {
          ${options.includeOffline ? '' : 'HAVING online = 1'}
          ORDER BY agents.last_seen_at DESC, agents.name`,
       )
-      .all(now, now) as AgentRow[];
+      .all(now, now) as unknown as AgentRow[];
     return rows.map(toAgent);
   }
 
   #requireAgent(name: string): void {
     const found = this.database.prepare('SELECT 1 FROM agents WHERE name = ?').get(name);
     if (!found) {
-      throw new ClankChatError(
+      throw new ClankerChatError(
         'AGENT_NOT_FOUND',
         `Agent ${name} has not joined this repository line yet; run status, agents, heartbeat, or a message command as ${name} first.`,
       );
@@ -384,22 +406,23 @@ export class ChatLine {
   }): Message {
     this.heartbeat();
     const body = bounded(input.body, 'Message');
+    const sourceKey = input.sourceKey ? bounded(input.sourceKey, 'Source key', 200) : null;
     const recipient = input.to ? validateAgentName(input.to) : null;
     if (recipient) this.#requireAgent(recipient);
     if (input.pinned && recipient) {
-      throw new ClankChatError('INVALID_INPUT', 'Only broadcasts can be pinned.');
+      throw new ClankerChatError('INVALID_INPUT', 'Only broadcasts can be pinned.');
     }
     const id = identifier('message');
     const createdAt = this.#now();
     const correlationId = input.correlationId ?? null;
     return immediateTransaction(this.database, () => {
-      const existing = input.sourceKey
+      const existing = sourceKey
         ? (this.database
             .prepare(
               `SELECT messages.*, NULL AS delivered_at, NULL AS read_at
                FROM messages WHERE source_key = ?`,
             )
-            .get(input.sourceKey) as MessageRow | undefined)
+            .get(sourceKey) as MessageRow | undefined)
         : undefined;
       if (existing) {
         if (
@@ -410,12 +433,28 @@ export class ChatLine {
           existing.pinned !== (input.pinned ? 1 : 0) ||
           existing.reply_to !== (input.replyTo ?? null)
         ) {
-          throw new ClankChatError(
+          throw new ClankerChatError(
             'MESSAGE_CONFLICT',
             'The source key already names another message.',
           );
         }
         return toMessage(existing);
+      }
+
+      const usage = this.database
+        .prepare(
+          `SELECT COUNT(*) AS messages,
+                  COALESCE(SUM(length(CAST(body AS BLOB))), 0) AS bytes,
+                  COALESCE(SUM(pinned), 0) AS pins
+           FROM messages`,
+        )
+        .get() as { bytes: number; messages: number; pins: number };
+      if (
+        usage.messages >= MAX_MESSAGES ||
+        usage.bytes + Buffer.byteLength(body) > MAX_MESSAGE_BYTES ||
+        (input.pinned && usage.pins >= MAX_PINS)
+      ) {
+        throw new ClankerChatError('DATABASE_ERROR', 'The repository message quota is exhausted.');
       }
 
       this.database
@@ -433,7 +472,7 @@ export class ChatLine {
           recipient,
           body,
           input.pinned ? 1 : 0,
-          input.sourceKey ?? null,
+          sourceKey,
           createdAt,
         );
       if (recipient) {
@@ -514,14 +553,14 @@ export class ChatLine {
          FROM messages WHERE id = ?`,
       )
       .get(input.toMessage) as MessageRow | undefined;
-    if (!request) throw new ClankChatError('MESSAGE_NOT_FOUND', 'The request does not exist.');
+    if (!request) throw new ClankerChatError('MESSAGE_NOT_FOUND', 'The request does not exist.');
     if (request.kind !== 'request' || request.recipient !== this.agentName) {
-      throw new ClankChatError('REPLY_NOT_ALLOWED', 'Only the request recipient can reply.');
+      throw new ClankerChatError('REPLY_NOT_ALLOWED', 'Only the request recipient can reply.');
     }
     const existing = this.database
       .prepare('SELECT id FROM messages WHERE reply_to = ?')
       .get(request.id);
-    if (existing) throw new ClankChatError('REPLY_EXISTS', 'This request already has a reply.');
+    if (existing) throw new ClankerChatError('REPLY_EXISTS', 'This request already has a reply.');
     try {
       return this.#insertMessage({
         kind: 'reply',
@@ -534,7 +573,7 @@ export class ChatLine {
     } catch (error) {
       const code = error instanceof Error ? String(Reflect.get(error, 'code') ?? '') : '';
       if (code.startsWith('SQLITE_CONSTRAINT')) {
-        throw new ClankChatError('REPLY_EXISTS', 'This request already has a reply.');
+        throw new ClankerChatError('REPLY_EXISTS', 'This request already has a reply.');
       }
       throw error;
     }
@@ -549,7 +588,10 @@ export class ChatLine {
       .prepare('SELECT sender, kind FROM messages WHERE id = ?')
       .get(requestId) as { sender: string; kind: string } | undefined;
     if (request?.kind !== 'request' || request.sender !== this.agentName) {
-      throw new ClankChatError('REPLY_NOT_ALLOWED', 'Only the request sender can await its reply.');
+      throw new ClankerChatError(
+        'REPLY_NOT_ALLOWED',
+        'Only the request sender can await its reply.',
+      );
     }
     const deadline = this.#now() + timeoutMs;
     try {
@@ -572,13 +614,13 @@ export class ChatLine {
         });
       }
       if (options.signal?.aborted) {
-        throw new ClankChatError('REQUEST_CANCELLED', 'Waiting for the reply was cancelled.', {
+        throw new ClankerChatError('REQUEST_CANCELLED', 'Waiting for the reply was cancelled.', {
           requestId,
         });
       }
       const final = this.#consumeAvailableReply(requestId);
       if (final) return final;
-      throw new ClankChatError('REPLY_TIMEOUT', 'No reply arrived before the timeout.', {
+      throw new ClankerChatError('REPLY_TIMEOUT', 'No reply arrived before the timeout.', {
         requestId,
         timeoutMs,
       });
@@ -634,7 +676,7 @@ export class ChatLine {
   }): Promise<{ request: Message; reply: Message }> {
     const timeoutMs = replyTimeout(input.timeoutMs ?? DEFAULT_REPLY_TIMEOUT_MS);
     if (input.signal?.aborted) {
-      throw new ClankChatError('REQUEST_CANCELLED', 'The request was cancelled before sending.');
+      throw new ClankerChatError('REQUEST_CANCELLED', 'The request was cancelled before sending.');
     }
     const request = this.#insertMessage({
       kind: 'request',
@@ -654,7 +696,7 @@ export class ChatLine {
     this.heartbeat();
     const limit = options.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
-      throw new ClankChatError('INVALID_INPUT', 'Inbox limit must be 1-1000.');
+      throw new ClankerChatError('INVALID_INPUT', 'Inbox limit must be 1-1000.');
     }
     const rows = this.database
       .prepare(
@@ -669,7 +711,7 @@ export class ChatLine {
          ORDER BY messages.created_at DESC, messages.id DESC
          LIMIT ?`,
       )
-      .all(this.agentName, this.#sessionId, limit) as MessageRow[];
+      .all(this.agentName, this.#sessionId, limit) as unknown as MessageRow[];
     return rows.map(toMessage);
   }
 
@@ -686,8 +728,8 @@ export class ChatLine {
       );
       for (const id of ids) {
         const result = update.run(now, id, this.agentName, this.#sessionId);
-        if (result.changes > 0) {
-          changed += result.changes;
+        if (Number(result.changes) > 0) {
+          changed += Number(result.changes);
           this.#recordEvent('message.acknowledged', this.agentName, id, {});
         }
       }
@@ -739,7 +781,7 @@ export class ChatLine {
            WHERE message_id = ? AND agent_name = ? AND scope = ? AND delivered_at IS NULL`,
         )
         .run(this.#sessionId, token, now, row.id, row.agent_name, row.scope);
-      if (updated.changes !== 1) return null;
+      if (Number(updated.changes) !== 1) return null;
       this.#reservations.set(row.id, token);
       return { ...toMessage(row), ...(row.scope ? { deliveryScope: row.scope } : {}) };
     });
@@ -762,7 +804,7 @@ export class ChatLine {
   completeDelivery(messageId: string): void {
     const token = this.#reservations.get(messageId);
     if (!token) {
-      throw new ClankChatError(
+      throw new ClankerChatError(
         'MESSAGE_CONFLICT',
         'This delivery reservation is no longer current.',
       );
@@ -776,8 +818,8 @@ export class ChatLine {
       )
       .run(this.#now(), messageId, this.agentName, token);
     this.#reservations.delete(messageId);
-    if (result.changes !== 1) {
-      throw new ClankChatError(
+    if (Number(result.changes) !== 1) {
+      throw new ClankerChatError(
         'MESSAGE_CONFLICT',
         'This delivery reservation is no longer current.',
       );
@@ -802,7 +844,7 @@ export class ChatLine {
     const limit = options.limit ?? 1_000;
     const rows = this.database
       .prepare('SELECT * FROM events WHERE sequence > ? ORDER BY sequence LIMIT ?')
-      .all(options.after ?? 0, limit) as EventRow[];
+      .all(options.after ?? 0, limit) as unknown as EventRow[];
     return rows.map(toEvent);
   }
 
@@ -817,7 +859,7 @@ export class ChatLine {
     const current = this.heartbeat();
     const allAgents = this.agents({ includeOffline: true });
     const self = allAgents.find((entry) => entry.name === this.agentName);
-    if (!self) throw new ClankChatError('AGENT_NOT_FOUND', 'The current agent disappeared.');
+    if (!self) throw new ClankerChatError('AGENT_NOT_FOUND', 'The current agent disappeared.');
     const unread = this.database
       .prepare(
         `SELECT COUNT(DISTINCT message_id) AS count FROM message_recipients
@@ -840,7 +882,7 @@ export class ChatLine {
 /** A read-only event cursor for humans that never joins the agent line. */
 export class ChatObserver {
   readonly repository: RepositoryContext;
-  readonly database: Database.Database;
+  readonly database: ChatDatabase;
 
   constructor(cwd = process.cwd()) {
     this.repository = resolveRepository(cwd);
@@ -852,7 +894,7 @@ export class ChatObserver {
   events(options: { after?: number; limit?: number } = {}): ChatEvent[] {
     const rows = this.database
       .prepare('SELECT * FROM events WHERE sequence > ? ORDER BY sequence LIMIT ?')
-      .all(options.after ?? 0, options.limit ?? 1_000) as EventRow[];
+      .all(options.after ?? 0, options.limit ?? 1_000) as unknown as EventRow[];
     return rows.map(toEvent);
   }
 

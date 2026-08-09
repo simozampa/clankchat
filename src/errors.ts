@@ -14,27 +14,31 @@ export type ErrorCode =
   | 'SETUP_ERROR';
 
 /** An expected product failure that adapters can render without a stack trace. */
-export class ClankChatError extends Error {
+export class ClankerChatError extends Error {
   readonly code: ErrorCode;
   readonly details: Record<string, unknown>;
 
   constructor(code: ErrorCode, message: string, details: Record<string, unknown> = {}) {
     super(message);
-    this.name = 'ClankChatError';
+    this.name = 'ClankerChatError';
     this.code = code;
     this.details = details;
   }
 }
 
-export function isClankChatError(error: unknown): error is ClankChatError {
-  return error instanceof ClankChatError;
+export function isClankerChatError(error: unknown): error is ClankerChatError {
+  return error instanceof ClankerChatError;
 }
+
+// Preserve source compatibility for consumers moving from the short-lived clankchat package.
+export { ClankerChatError as ClankChatError };
+export const isClankChatError = isClankerChatError;
 
 export function errorResult(error: unknown): {
   error: { code: string; details: Record<string, unknown>; message: string };
   ok: false;
 } {
-  if (isClankChatError(error)) {
+  if (isClankerChatError(error)) {
     return {
       ok: false,
       error: { code: error.code, message: error.message, details: error.details },
@@ -47,7 +51,7 @@ export function errorResult(error: unknown): {
       ok: false,
       error: {
         code: 'DATABASE_BUSY',
-        message: 'The clankchat line remained locked while waiting for another writer.',
+        message: 'The clankerchat line remained locked while waiting for another writer.',
         details: { cause: error instanceof Error ? error.message : String(error) },
       },
     };
