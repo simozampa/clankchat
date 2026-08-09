@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { ClankChatError } from '../src/errors.js';
+import { ClankerChatError } from '../src/errors.js';
 import { ChatLine } from '../src/line.js';
 import { repository, type TestRepository } from './helpers.js';
 
@@ -125,7 +125,7 @@ describe('request and reply', () => {
     const { alice, bob } = pair();
     const carol = new ChatLine({ cwd: alice.repository.root, agent: 'carol' });
     const request = alice.request({ to: 'bob', body: 'Question' });
-    expect(() => carol.reply({ toMessage: request.id, body: 'No.' })).toThrow(ClankChatError);
+    expect(() => carol.reply({ toMessage: request.id, body: 'No.' })).toThrow(ClankerChatError);
     bob.reply({ toMessage: request.id, body: 'Answer.' });
     expect(() => bob.reply({ toMessage: request.id, body: 'Again.' })).toThrow(/already/u);
     alice.close();

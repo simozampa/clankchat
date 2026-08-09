@@ -1,11 +1,22 @@
-import { existsSync, lstatSync, mkdirSync } from 'node:fs';
+import { lstatSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 
-import Database from 'better-sqlite3';
+import { ClankerChatError } from './errors.js';
 
-import { ClankChatError } from './errors.js';
+const emitWarning = process.emitWarning;
+process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
+  if (String(warning).includes('SQLite is an experimental feature')) return;
+  Reflect.apply(emitWarning, process, [warning, ...args]);
+}) as typeof process.emitWarning;
+const { DatabaseSync: NodeDatabaseSync } = await import('node:sqlite').finally(() => {
+  process.emitWarning = emitWarning;
+});
 
 const SCHEMA_VERSION = 1;
+const BUSY_TIMEOUT_MS = 15_000;
+const APPLICATION_ID = 0x434c_4e4b;
+const busyWait = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS agents (
   name TEXT PRIMARY KEY,
@@ -86,57 +97,182 @@ CREATE TABLE IF NOT EXISTS events (
 ) STRICT;
 `;
 
+function pathState(target: string): ReturnType<typeof lstatSync> | null {
+  try {
+    return lstatSync(target);
+  } catch (error) {
+    if (error instanceof Error && Reflect.get(error, 'code') === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 function ensureSafeParent(databasePath: string): void {
   const parent = path.dirname(databasePath);
-  if (existsSync(parent) && lstatSync(parent).isSymbolicLink()) {
-    throw new ClankChatError('DATABASE_ERROR', 'Refusing to use a symlinked state directory.', {
+  if (pathState(parent)?.isSymbolicLink()) {
+    throw new ClankerChatError('DATABASE_ERROR', 'Refusing to use a symlinked state directory.', {
       path: parent,
     });
   }
   mkdirSync(parent, { recursive: true, mode: 0o700 });
-  if (existsSync(databasePath) && lstatSync(databasePath).isSymbolicLink()) {
-    throw new ClankChatError('DATABASE_ERROR', 'Refusing to open a symlinked database.', {
+  const databaseState = pathState(databasePath);
+  if (databaseState && (!databaseState.isFile() || databaseState.isSymbolicLink())) {
+    throw new ClankerChatError('DATABASE_ERROR', 'Refusing to open a non-regular database.', {
       path: databasePath,
     });
+  }
+  for (const suffix of ['-journal', '-shm', '-wal']) {
+    const sidecar = `${databasePath}${suffix}`;
+    const sidecarState = pathState(sidecar);
+    if (sidecarState && (!sidecarState.isFile() || sidecarState.isSymbolicLink())) {
+      throw new ClankerChatError(
+        'DATABASE_ERROR',
+        'Refusing to use a non-regular SQLite sidecar.',
+        {
+          path: sidecar,
+        },
+      );
+    }
   }
 }
 
 export function assertDatabaseRuntimeCompatible(): void {
-  const database = new Database(':memory:');
+  const database = new NodeDatabaseSync(':memory:');
   database.close();
 }
 
-export function openDatabase(databasePath: string): Database.Database {
-  ensureSafeParent(databasePath);
-  try {
-    const database = new Database(databasePath, { timeout: 15_000 });
-    database.pragma('foreign_keys = ON');
-    database.pragma('journal_mode = WAL');
-    database.pragma('synchronous = FULL');
-    database.pragma('busy_timeout = 15000');
-    const version = Number(database.pragma('user_version', { simple: true }));
-    if (version !== 0 && version !== SCHEMA_VERSION) {
-      database.close();
-      throw new ClankChatError('DATABASE_ERROR', 'Unsupported clankchat database version.', {
-        expected: SCHEMA_VERSION,
-        actual: version,
-      });
+export type ChatDatabase = DatabaseSync;
+
+function pragmaNumber(database: DatabaseSync, name: string): number {
+  const row = database.prepare(`PRAGMA ${name}`).get() as Record<string, unknown> | undefined;
+  return Number(row?.[name]);
+}
+
+interface CatalogEntry {
+  type: string;
+  name: string;
+  table: string;
+  sql: string;
+}
+
+function catalog(database: DatabaseSync): CatalogEntry[] {
+  return database
+    .prepare(
+      `SELECT type, name, tbl_name AS [table], sql
+       FROM sqlite_schema
+       WHERE name NOT LIKE 'sqlite_%'
+       ORDER BY type, name`,
+    )
+    .all() as unknown as CatalogEntry[];
+}
+
+const expectedDatabase = new NodeDatabaseSync(':memory:');
+expectedDatabase.exec(SCHEMA);
+const EXPECTED_CATALOG = catalog(expectedDatabase);
+expectedDatabase.close();
+
+function inspectOwnership(database: DatabaseSync): { applicationId: number; version: number } {
+  const version = pragmaNumber(database, 'user_version');
+  const applicationId = pragmaNumber(database, 'application_id');
+  if (version !== 0 && version !== SCHEMA_VERSION) {
+    throw new ClankerChatError('DATABASE_ERROR', 'Unsupported clankerchat database version.', {
+      expected: SCHEMA_VERSION,
+      actual: version,
+    });
+  }
+  if (applicationId !== 0 && applicationId !== APPLICATION_ID) {
+    throw new ClankerChatError('DATABASE_ERROR', 'The state file belongs to another application.');
+  }
+  const actualCatalog = catalog(database);
+  if (version === 0 && actualCatalog.length > 0) {
+    throw new ClankerChatError('DATABASE_ERROR', 'Refusing to claim a nonempty SQLite database.');
+  }
+  if (
+    version === SCHEMA_VERSION &&
+    JSON.stringify(actualCatalog) !== JSON.stringify(EXPECTED_CATALOG)
+  ) {
+    throw new ClankerChatError('DATABASE_ERROR', 'The state file is not a clankerchat database.');
+  }
+  return { applicationId, version };
+}
+
+function isBusyError(error: unknown): boolean {
+  const code = error instanceof Error ? String(Reflect.get(error, 'code') ?? '') : '';
+  const message = error instanceof Error ? error.message : '';
+  return code.includes('BUSY') || code.includes('LOCKED') || /busy|locked/iu.test(message);
+}
+
+function enableWal(database: DatabaseSync): void {
+  const deadline = Date.now() + BUSY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      database.exec('PRAGMA journal_mode = WAL');
+      return;
+    } catch (error) {
+      if (!isBusyError(error) || Date.now() >= deadline) throw error;
+      Atomics.wait(busyWait, 0, 0, 25);
     }
-    database.exec(SCHEMA);
-    database.pragma(`user_version = ${SCHEMA_VERSION}`);
-    return database;
-  } catch (error) {
-    if (error instanceof ClankChatError) throw error;
-    const code = error instanceof Error ? String(Reflect.get(error, 'code') ?? '') : '';
-    throw new ClankChatError(
-      code.includes('BUSY') || code.includes('LOCKED') ? 'DATABASE_BUSY' : 'DATABASE_ERROR',
-      error instanceof Error ? error.message : 'Could not open the clankchat database.',
-      { path: databasePath },
-    );
   }
 }
 
-export function immediateTransaction<T>(database: Database.Database, operation: () => T): T {
+export function openDatabase(databasePath: string): DatabaseSync {
+  ensureSafeParent(databasePath);
+  let database: DatabaseSync | null = null;
+  let phase = 'preflight';
+  try {
+    if (pathState(databasePath)) {
+      const readOnly = new NodeDatabaseSync(databasePath, { readOnly: true });
+      try {
+        inspectOwnership(readOnly);
+      } finally {
+        readOnly.close();
+      }
+    }
+    phase = 'open';
+    database = new NodeDatabaseSync(databasePath);
+    phase = 'inspect';
+    inspectOwnership(database);
+    phase = 'pragmas';
+    database.exec(`
+      PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};
+      PRAGMA foreign_keys = ON;
+    `);
+    phase = 'journal';
+    enableWal(database);
+    phase = 'pragmas';
+    database.exec('PRAGMA synchronous = FULL');
+    phase = 'transaction';
+    database.exec('BEGIN IMMEDIATE');
+    try {
+      const ownership = inspectOwnership(database);
+      if (ownership.version === 0) {
+        database.exec(SCHEMA);
+        database.exec(
+          `PRAGMA application_id = ${APPLICATION_ID}; PRAGMA user_version = ${SCHEMA_VERSION};`,
+        );
+      } else if (ownership.applicationId === 0) {
+        database.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
+      }
+      database.exec('COMMIT');
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+    return database;
+  } catch (error) {
+    try {
+      database?.close();
+    } catch {}
+    if (error instanceof ClankerChatError) throw error;
+    const message =
+      error instanceof Error ? error.message : 'Could not open the clankerchat database.';
+    throw new ClankerChatError(isBusyError(error) ? 'DATABASE_BUSY' : 'DATABASE_ERROR', message, {
+      path: databasePath,
+      phase,
+    });
+  }
+}
+
+export function immediateTransaction<T>(database: DatabaseSync, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
     const result = operation();

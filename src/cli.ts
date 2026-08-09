@@ -1,9 +1,5 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 import { errorResult } from './errors.js';
-import { runWithInstallRuntime } from './runtime.js';
-
-const relaunched = await runWithInstallRuntime();
-if (relaunched !== null) process.exit(relaunched);
 
 const controller = new AbortController();
 let signalExitCode: number | null = null;

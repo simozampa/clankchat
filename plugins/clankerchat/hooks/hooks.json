@@ -9,7 +9,7 @@
             "command": "node",
             "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/capture-pinned.mjs"],
             "timeout": 5,
-            "statusMessage": "Pinning broadcast in clankchat"
+            "statusMessage": "Pinning broadcast in clankerchat"
           }
         ]
       }

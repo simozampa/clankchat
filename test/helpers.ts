@@ -8,7 +8,7 @@ export interface TestRepository {
   cleanup: () => void;
 }
 
-export function repository(prefix = 'clankchat-test-'): TestRepository {
+export function repository(prefix = 'clankerchat-test-'): TestRepository {
   const root = mkdtempSync(path.join(tmpdir(), prefix));
   execFileSync('git', ['init', '--quiet', root]);
   execFileSync('git', [

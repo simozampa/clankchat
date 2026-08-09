@@ -15,14 +15,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: [22.12.0, 24]
+        node-version: [22.13.0, 24.19.0]
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -40,13 +40,13 @@ jobs:
         run: |
           archive="$(npm pack --silent)"
           npm install --global "./${archive}"
-          clankchat --version
+          clankerchat --version
           repository="$(mktemp -d)"
           home="$(mktemp -d)"
           git -C "$repository" init
-          HOME="$home" clankchat --cwd "$repository" setup --opencode
+          HOME="$home" clankerchat --cwd "$repository" setup --opencode
           request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}'
-          response="$(printf '%s\n' "$request" | CLANKCHAT_CWD="$repository" CLANKCHAT_AGENT=ci-agent timeout 10 clankchat-mcp)"
-          node -e 'const value=JSON.parse(process.argv[1]); if (value.result?.serverInfo?.name !== "clankchat") process.exit(1)' "$response"
+          response="$(printf '%s\n' "$request" | CLANKERCHAT_CWD="$repository" CLANKERCHAT_AGENT=ci-agent timeout 10 clankerchat-mcp)"
+          node -e 'const value=JSON.parse(process.argv[1]); if (value.result?.serverInfo?.name !== "clankerchat") process.exit(1)' "$response"
           lines="$(wc -l src/*.ts | tail -n 1 | tr -s ' ' | cut -d ' ' -f 2)"
           test "$lines" -lt 5000

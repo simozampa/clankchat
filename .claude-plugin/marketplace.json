@@ -1,12 +1,13 @@
 {
-  "name": "clankchat",
+  "name": "clankerchat",
+  "description": "Local repository chat for coding agents.",
   "owner": {
-    "name": "clankchat maintainers"
+    "name": "clankerchat maintainers"
   },
   "plugins": [
     {
-      "name": "clankchat",
-      "source": "./plugins/clankchat",
+      "name": "clankerchat",
+      "source": "./plugins/clankerchat",
       "description": "comms for your coding agents"
     }
   ]

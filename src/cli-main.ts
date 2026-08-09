@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 import { Command } from 'commander';
@@ -22,12 +22,25 @@ function print(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+function readStdin(limit: number): string {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const chunk = Buffer.allocUnsafe(Math.min(64 * 1_024, limit + 1 - total));
+    const count = readSync(0, chunk, 0, chunk.length, null);
+    if (count === 0) return Buffer.concat(chunks, total).toString('utf8');
+    total += count;
+    if (total > limit) throw new Error(`Standard input exceeds ${limit} bytes.`);
+    chunks.push(chunk.subarray(0, count));
+  }
+}
+
 function body(options: { body?: string; bodyStdin?: boolean }): string {
   if (options.body !== undefined && options.bodyStdin) {
     throw new Error('Use either --body or --body-stdin, not both.');
   }
   if (options.body !== undefined) return options.body;
-  if (options.bodyStdin) return readFileSync(0, 'utf8');
+  if (options.bodyStdin) return readStdin(50_000);
   throw new Error('A message body is required.');
 }
 
@@ -39,12 +52,13 @@ function openLine(command: Command): ChatLine {
   const options = globalOptions(command);
   const harness = options.harness ?? detectHarness();
   const announcePresence = command.name() === 'follow' && command.parent?.name() === 'message';
+  const sessionId = process.env.CLANKERCHAT_SESSION ?? process.env.CLANKCHAT_SESSION;
   return new ChatLine({
     cwd: options.cwd,
     agent: options.agent ?? agentIdentity(harness),
     harness,
     announcePresence,
-    ...(process.env.CLANKCHAT_SESSION ? { sessionId: process.env.CLANKCHAT_SESSION } : {}),
+    ...(sessionId ? { sessionId } : {}),
   });
 }
 
@@ -71,11 +85,19 @@ async function withLineAsync<T>(
 
 export function buildProgram(signal?: AbortSignal): Command {
   const program = new Command()
-    .name('clankchat')
+    .name('clankerchat')
     .description('comms for your coding agents')
     .version(VERSION)
-    .option('--cwd <path>', 'repository path', process.env.CLANKCHAT_CWD ?? process.cwd())
-    .option('--agent <name>', 'agent name', process.env.CLANKCHAT_AGENT)
+    .option(
+      '--cwd <path>',
+      'repository path',
+      process.env.CLANKERCHAT_CWD ?? process.env.CLANKCHAT_CWD ?? process.cwd(),
+    )
+    .option(
+      '--agent <name>',
+      'agent name',
+      process.env.CLANKERCHAT_AGENT ?? process.env.CLANKCHAT_AGENT,
+    )
     .option('--harness <name>', 'claude-code, opencode, or other');
 
   program
@@ -293,7 +315,7 @@ export function buildProgram(signal?: AbortSignal): Command {
     .description('Capture a pinned human broadcast from a harness event.')
     .action((_options: unknown, command: Command) => {
       try {
-        const input: unknown = JSON.parse(readFileSync(0, 'utf8'));
+        const input: unknown = JSON.parse(readStdin(1_000_000));
         if (typeof input !== 'object' || input === null) return;
         const prompt = Reflect.get(input, 'prompt');
         if (typeof prompt !== 'string' || !prompt.startsWith('For all agents:')) return;
@@ -319,7 +341,7 @@ export function buildProgram(signal?: AbortSignal): Command {
       const watchdog = setTimeout(() => process.exit(0), 4_000);
       try {
         if (!isCodexHookEvent(options.event)) return;
-        await handleCodexHook(options.event, readFileSync(0, 'utf8'));
+        await handleCodexHook(options.event, readStdin(1_000_000));
       } catch {
       } finally {
         clearTimeout(watchdog);

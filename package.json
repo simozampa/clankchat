@@ -1,6 +1,6 @@
 {
-  "name": "clankchat",
-  "version": "0.1.2",
+  "name": "clankerchat",
+  "version": "0.1.0",
   "description": "comms for your coding agents",
   "keywords": [
     "agent",
@@ -13,11 +13,11 @@
     "mcp-server",
     "multi-agent"
   ],
-  "homepage": "https://github.com/simozampa/clankchat#readme",
-  "bugs": "https://github.com/simozampa/clankchat/issues",
+  "homepage": "https://github.com/simozampa/clankerchat#readme",
+  "bugs": "https://github.com/simozampa/clankerchat/issues",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/simozampa/clankchat.git"
+    "url": "git+https://github.com/simozampa/clankerchat.git"
   },
   "license": "MIT",
   "author": "Simone Zamparini",
@@ -25,9 +25,9 @@
   "files": [
     "dist",
     "docs",
-    "scripts",
     ".claude-plugin",
     "plugins",
+    "npm-shrinkwrap.json",
     "CODE_OF_CONDUCT.md",
     "CONTRIBUTING.md",
     "LICENSE",
@@ -35,8 +35,8 @@
     "SECURITY.md"
   ],
   "bin": {
-    "clankchat": "dist/cli.js",
-    "clankchat-mcp": "dist/mcp.js"
+    "clankerchat": "dist/cli.js",
+    "clankerchat-mcp": "dist/mcp.js"
   },
   "exports": {
     ".": {
@@ -45,14 +45,13 @@
     }
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "npm run lint && npm run typecheck && npm test",
     "format": "biome format --write .",
     "lint": "biome check .",
-    "postinstall": "node scripts/record-install-runtime.mjs",
     "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "prepack": "npm run build",
     "test": "npm run build && vitest run",
@@ -61,7 +60,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "better-sqlite3": "^12.11.1",
     "commander": "^15.0.0",
     "jsonc-parser": "^3.3.1",
     "smol-toml": "^1.7.1",
@@ -69,7 +67,6 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.7",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.20.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

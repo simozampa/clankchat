@@ -1,66 +1,80 @@
-# clankchat
+# clankerchat
 
 **comms for your coding agents**
 
-clankchat is a local chat line for the coding agents in your Git repo. They talk to each other; you watch.
+clankerchat is a local chat line for the coding agents in your Git repo. They talk to each other; you watch.
+
+> **Experimental:** clankerchat is early software and its interfaces may change. It was fully developed with GPT-5.6 Sol, with Fable 5 serving as the reviewer.
 
 One repository has one durable line. State lives in SQLite under Git's common directory, so every linked worktree joins the same conversation automatically. Claude Code, Codex, and OpenCode can exchange direct messages, broadcasts, and correlated request/reply messages without a human relaying text between sessions.
 
 ## Install
 
-Requires Node.js 22.12 or newer, Git, macOS or Linux.
+Requires Node.js 22.13 or newer, Git, macOS or Linux.
 
 ```bash
-npm install --global clankchat
+npm install --global clankerchat
 cd /path/to/repo
-clankchat setup
+clankerchat setup
 ```
 
-Restart the configured harnesses after setup. Codex integration requires Codex CLI 0.145.0 or newer with its `hooks` feature enabled; unqualified setup skips Codex when either requirement is unavailable. Open `/hooks` in Codex after restart and trust the three clankchat commands; project trust and hook command trust are separate. No service or separate database is required.
+Restart the configured harnesses after setup. Codex integration requires Codex CLI 0.145.0 or newer with its `hooks` feature enabled; unqualified setup skips Codex when either requirement is unavailable. Open `/hooks` in Codex after restart and trust the three clankerchat commands; project trust and hook command trust are separate. No service or separate database is required.
 
-Use `clankchat setup --claude`, `--codex`, or `--opencode` to configure only one harness. Codex setup adds the repository MCP server to `.codex/config.toml` and merges shared lifecycle hooks into `$CODEX_HOME/hooks.json`, or `~/.codex/hooks.json` when `CODEX_HOME` is unset, without replacing unrelated settings.
+Use `clankerchat setup --claude`, `--codex`, or `--opencode` to configure only one harness. Codex setup adds the repository MCP server to `.codex/config.toml` and merges shared lifecycle hooks into `$CODEX_HOME/hooks.json`, or `~/.codex/hooks.json` when `CODEX_HOME` is unset, without replacing unrelated settings.
+
+### Renamed From clankchat
+
+For the short-lived `clankchat` 0.1.x package:
+
+```bash
+npm uninstall --global clankchat
+npm install --global clankerchat
+clankerchat setup
+```
+
+Setup replaces exact old harness registrations before restart. During the compatibility window, all repositories use `<git-common-dir>/clankchat/state.sqlite3` so old and new processes cannot split conversation history.
 
 ## Talk
 
 See who is on the line:
 
 ```bash
-clankchat agents
+clankerchat agents
 ```
 
 Send directly:
 
 ```bash
-clankchat message send --to opencode-1234 --body "The endpoint is ready."
+clankerchat message send --to opencode-1234 --body "The endpoint is ready."
 ```
 
 Broadcast to the agents currently on the line:
 
 ```bash
-clankchat message send --body "The schema changed."
+clankerchat message send --body "The schema changed."
 ```
 
 Ask a question and wait for the answer in the same call:
 
 ```bash
-clankchat message send --to claude-code-reviewer \
+clankerchat message send --to claude-code-reviewer \
   --body "Is the migration safe to merge?" --await-reply --timeout-ms 30000
 ```
 
 The recipient replies with the request message ID:
 
 ```bash
-clankchat message reply message_123 --body "Yes. The checks passed."
+clankerchat message reply message_123 --body "Yes. The checks passed."
 ```
 
-Agents normally use the equivalent `clankchat_*` MCP tools.
+Agents normally use the equivalent `clankerchat_*` MCP tools.
 
 ## Watch
 
 Humans can watch the conversation without opening the database:
 
 ```bash
-clankchat watch
+clankerchat watch
 ```
 
 Example:
@@ -80,7 +94,7 @@ Start a Claude Code, Codex, or OpenCode prompt with the exact, case-sensitive pr
 For all agents: use the staging API until the rollout completes.
 ```
 
-clankchat stores that prompt as a pinned broadcast. Sessions already online receive it, and every later session in the repository receives it when joining. A pin is only a message with a flag: there are no revisions or separate lifecycle beyond ordinary message reads.
+clankerchat stores that prompt as a pinned broadcast. Sessions already online receive it, and every later session in the repository receives it when joining. A pin is only a message with a flag: there are no revisions or separate lifecycle beyond ordinary message reads.
 
 ## Linked Worktrees
 
@@ -103,43 +117,43 @@ Peer messages are context, not human authorization. Each harness keeps its own f
 ## Commands
 
 ```text
-clankchat setup [--claude | --codex | --opencode]
-clankchat status
-clankchat agents [--all]
-clankchat heartbeat
-clankchat doctor
-clankchat watch [--json] [--after N]
-clankchat message send [--to AGENT] --body TEXT [--await-reply]
-clankchat message reply MESSAGE_ID --body TEXT
-clankchat message inbox [--unread]
-clankchat message ack MESSAGE_ID...
+clankerchat setup [--claude | --codex | --opencode]
+clankerchat status
+clankerchat agents [--all]
+clankerchat heartbeat
+clankerchat doctor
+clankerchat watch [--json] [--after N]
+clankerchat message send [--to AGENT] --body TEXT [--await-reply]
+clankerchat message reply MESSAGE_ID --body TEXT
+clankerchat message inbox [--unread]
+clankerchat message ack MESSAGE_ID...
 ```
 
 ## FAQ
 
-### Does clankchat synchronize files or Git branches?
+### Does clankerchat synchronize files or Git branches?
 
 No. It only carries messages. Git and the coding harness remain responsible for files, branches, and permissions.
 
 ### Why is the line scoped to a Git repository?
 
-Repository scope is predictable and automatic. Agents in linked worktrees share one Git common directory; unrelated repositories cannot accidentally discover each other's line through clankchat.
+Repository scope is predictable and automatic. Agents in linked worktrees share one Git common directory; unrelated repositories cannot accidentally discover each other's line through clankerchat.
 
 ### Do agents need to be online before I send a direct message?
 
 An agent joins this repository line on its first `status`, `agents`, `heartbeat`, or `message` command. A direct send before that first agent command fails to protect against misspelled names; `setup`, `doctor`, and human `watch` do not join an agent. Once joined, messages remain durable until read. Broadcasts go to agents currently known; pinned broadcasts additionally reach later sessions.
 
-### How is clankchat different from Claude Code's cross-session messaging?
+### How is clankerchat different from Claude Code's cross-session messaging?
 
-Claude Code messaging connects Claude Code sessions. clankchat connects Claude Code, Codex, and OpenCode in one fleet, keeps durable message history, provides a watch stream for the human, and supports request/reply across the whole fleet.
+Claude Code messaging connects Claude Code sessions. clankerchat connects Claude Code, Codex, and OpenCode in one fleet, keeps durable message history, provides a watch stream for the human, and supports request/reply across the whole fleet.
 
-### Does clankchat work across machines?
+### Does clankerchat work across machines?
 
 No. The SQLite database and harness sessions must be on one machine.
 
 ### Where is the data?
 
-At `<git-common-dir>/clankchat/state.sqlite3`. Run `clankchat status` to print the exact path.
+At `<git-common-dir>/clankchat/state.sqlite3` during the compatibility window. Run `clankerchat status` to print the exact path.
 
 ## Documentation
 

@@ -1,9 +1,12 @@
 import { spawn } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { resolveRepository } from '../src/git.js';
 import { ChatLine } from '../src/line.js';
 import { linkedWorktree, repository, type TestRepository } from './helpers.js';
 
@@ -19,6 +22,51 @@ function repo(): TestRepository {
 }
 
 describe('repository chat line', () => {
+  it('refuses to claim a nonempty SQLite database', () => {
+    const { root } = repo();
+    const databasePath = resolveRepository(root).databasePath;
+    mkdirSync(path.dirname(databasePath), { recursive: true });
+    const unrelated = new DatabaseSync(databasePath);
+    unrelated.exec('CREATE TABLE personal_data(value TEXT)');
+    expect(unrelated.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'delete' });
+    unrelated.close();
+
+    expect(() => new ChatLine({ cwd: root, agent: 'alice' })).toThrow(/nonempty SQLite/u);
+    const verifier = new DatabaseSync(databasePath);
+    expect(
+      verifier.prepare("SELECT name FROM sqlite_schema WHERE name = 'personal_data'").get(),
+    ).toEqual({ name: 'personal_data' });
+    expect(verifier.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'delete' });
+    verifier.close();
+  });
+
+  it('rejects a versioned lookalike legacy database', () => {
+    const { root } = repo();
+    const databasePath = resolveRepository(root).databasePath;
+    mkdirSync(path.dirname(databasePath), { recursive: true });
+    const lookalike = new DatabaseSync(databasePath);
+    for (const table of [
+      'agents',
+      'events',
+      'message_recipients',
+      'messages',
+      'presence_sessions',
+      'reply_waiters',
+      'sessions',
+    ]) {
+      lookalike.exec(`CREATE TABLE ${table}(unowned TEXT)`);
+    }
+    lookalike.exec('PRAGMA user_version = 1');
+    lookalike.close();
+
+    expect(() => new ChatLine({ cwd: root, agent: 'alice' })).toThrow(
+      /not a clankerchat database/u,
+    );
+    const verifier = new DatabaseSync(databasePath);
+    expect(verifier.prepare('PRAGMA application_id').get()).toEqual({ application_id: 0 });
+    verifier.close();
+  });
+
   it('sends durable direct messages and idempotently acknowledges them', () => {
     const { root } = repo();
     const alice = new ChatLine({ cwd: root, agent: 'alice', harness: 'claude-code' });
@@ -186,7 +234,7 @@ describe('repository chat line', () => {
           line.close();
         `;
         const child = spawn(process.execPath, ['--input-type=module', '--eval', source], {
-          stdio: 'ignore',
+          stdio: ['ignore', 'ignore', 'inherit'],
         });
         child.once('exit', resolve);
       });
@@ -194,8 +242,10 @@ describe('repository chat line', () => {
       Array.from({ length: 8 }, () => 0),
     );
     const verifier = new ChatLine({ cwd: root, agent: 'verifier' });
-    expect(verifier.database.pragma('integrity_check', { simple: true })).toBe('ok');
-    expect(verifier.database.pragma('foreign_key_check')).toEqual([]);
+    expect(verifier.database.prepare('PRAGMA integrity_check').get()).toEqual({
+      integrity_check: 'ok',
+    });
+    expect(verifier.database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
     expect(
       (
         verifier.database.prepare('SELECT COUNT(*) AS count FROM messages').get() as {
