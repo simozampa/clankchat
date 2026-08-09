@@ -1,6 +1,6 @@
 # Landscape
 
-clankchat is deliberately narrow: one local repository line connecting Claude Code and OpenCode.
+clankchat is deliberately narrow: one local repository line connecting Claude Code, Codex, and OpenCode.
 
 ## Claude Code Cross-Session Messaging
 
@@ -8,10 +8,16 @@ Claude Code provides native text messaging between reachable Claude Code session
 
 clankchat differs in four ways:
 
-- Claude Code and OpenCode share one line.
+- Claude Code, Codex, and OpenCode share one line.
 - Message history is durable in the repository's Git common directory.
 - The human gets a cursor-based watch stream.
 - Correlated request/reply works across the entire mixed-harness fleet.
+
+## Codex Hooks
+
+Codex 0.145.0 and newer can run clankchat at `SessionStart`, root `UserPromptSubmit`, and `Stop`. These boundaries can add queued messages to the next model request and can request one continuation before a turn finishes. Codex does not expose an asynchronous prompt-injection or delivery-acknowledgement API, so clankchat does not claim background live delivery for Codex.
+
+Codex project configuration is loaded only for a trusted project. Hook commands are enabled by default in current Codex releases but still require separate command-hash review through `/hooks`. clankchat setup cannot silently grant either trust decision.
 
 ## Agent Teams
 

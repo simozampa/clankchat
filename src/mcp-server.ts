@@ -3,12 +3,18 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 
 import { agentIdentity, detectHarness } from './activity.js';
+import { codexAgentIdentity } from './codex.js';
 import { errorResult } from './errors.js';
 import { ChatLine } from './line.js';
 import type { Harness } from './types.js';
 import { VERSION } from './version.js';
 
 const outputSchema = { result: z.unknown() };
+
+interface ToolExtra {
+  signal: AbortSignal;
+  _meta?: { [key: string]: unknown };
+}
 
 function response(value: unknown, isError = false) {
   return {
@@ -20,29 +26,49 @@ function response(value: unknown, isError = false) {
 
 export function createMcpServer(
   options: { cwd?: string; agent?: string; harness?: Harness } = {},
-): { line: ChatLine; server: McpServer } {
+): { close: () => void; server: McpServer } {
+  const cwd =
+    options.cwd ?? process.env.CLANKCHAT_CWD ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
   const harness = options.harness ?? detectHarness();
-  const line = new ChatLine({
-    cwd:
-      options.cwd ?? process.env.CLANKCHAT_CWD ?? process.env.CLAUDE_PROJECT_DIR ?? process.cwd(),
-    agent: options.agent ?? agentIdentity(harness),
-    harness,
-  });
+  const codex = process.env.CLANKCHAT_CODEX === '1' && options.agent === undefined;
+  const lines = new Map<string, ChatLine>();
   const server = new McpServer({ name: 'clankchat', version: VERSION });
 
-  function execute(operation: () => unknown) {
+  function lineFor(extra: ToolExtra): ChatLine {
+    const threadId = extra._meta?.threadId;
+    if (codex && (typeof threadId !== 'string' || threadId.length === 0)) {
+      throw new Error('Codex did not provide its thread identity.');
+    }
+    const codexAgent = codex && typeof threadId === 'string' ? codexAgentIdentity(threadId) : null;
+    if (codex && !codexAgent) throw new Error('Codex provided an invalid thread identity.');
+    const key = codexAgent ? `codex:${codexAgent}` : 'default';
+    const existing = lines.get(key);
+    if (existing) return existing;
+    const line = new ChatLine({
+      cwd,
+      agent: codexAgent ?? options.agent ?? agentIdentity(harness),
+      harness: codexAgent ? 'other' : harness,
+      ...(codexAgent ? { sessionId: `codex-mcp-${codexAgent.slice('codex-'.length)}` } : {}),
+    });
+    lines.set(key, line);
+    return line;
+  }
+
+  function execute(extra: ToolExtra, operation: (line: ChatLine) => unknown) {
     try {
+      const line = lineFor(extra);
       line.heartbeat();
-      return response(operation());
+      return response(operation(line));
     } catch (error) {
       return response(errorResult(error), true);
     }
   }
 
-  async function executeAsync(operation: () => Promise<unknown>) {
+  async function executeAsync(extra: ToolExtra, operation: (line: ChatLine) => Promise<unknown>) {
     try {
+      const line = lineFor(extra);
       line.heartbeat();
-      return response(await operation());
+      return response(await operation(line));
     } catch (error) {
       return response(errorResult(error), true);
     }
@@ -63,19 +89,19 @@ export function createMcpServer(
       },
       outputSchema,
     },
-    ({ body, to, awaitReply, timeoutMs, pinned }, { signal }) => {
+    ({ body, to, awaitReply, timeoutMs, pinned }, extra) => {
       if (awaitReply) {
-        return executeAsync(async () => {
+        return executeAsync(extra, async (line) => {
           if (!to) throw new Error('awaitReply requires a direct recipient.');
           return await line.requestAndAwait({
             to,
             body,
             ...(timeoutMs === undefined ? {} : { timeoutMs }),
-            signal,
+            signal: extra.signal,
           });
         });
       }
-      return execute(() =>
+      return execute(extra, (line) =>
         line.send({
           body,
           ...(to ? { to } : {}),
@@ -96,7 +122,8 @@ export function createMcpServer(
       },
       outputSchema,
     },
-    ({ messageId, body }) => execute(() => line.reply({ toMessage: messageId, body })),
+    ({ messageId, body }, extra) =>
+      execute(extra, (line) => line.reply({ toMessage: messageId, body })),
   );
 
   server.registerTool(
@@ -111,8 +138,8 @@ export function createMcpServer(
       outputSchema,
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    ({ unreadOnly, limit }) =>
-      execute(() =>
+    ({ unreadOnly, limit }, extra) =>
+      execute(extra, (line) =>
         line.inbox({
           ...(unreadOnly === undefined ? {} : { unreadOnly }),
           ...(limit === undefined ? {} : { limit }),
@@ -129,7 +156,8 @@ export function createMcpServer(
       outputSchema,
       annotations: { idempotentHint: true },
     },
-    ({ messageIds }) => execute(() => ({ acknowledged: line.acknowledge(messageIds) })),
+    ({ messageIds }, extra) =>
+      execute(extra, (line) => ({ acknowledged: line.acknowledge(messageIds) })),
   );
 
   server.registerTool(
@@ -141,7 +169,8 @@ export function createMcpServer(
       outputSchema,
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    ({ includeOffline }) => execute(() => line.agents({ includeOffline: includeOffline ?? false })),
+    ({ includeOffline }, extra) =>
+      execute(extra, (line) => line.agents({ includeOffline: includeOffline ?? false })),
   );
 
   server.registerTool(
@@ -152,7 +181,7 @@ export function createMcpServer(
       outputSchema,
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    () => execute(() => line.status()),
+    (extra) => execute(extra, (line) => line.status()),
   );
 
   server.registerTool(
@@ -163,17 +192,25 @@ export function createMcpServer(
       outputSchema,
       annotations: { idempotentHint: true },
     },
-    () => execute(() => line.heartbeat()),
+    (extra) => execute(extra, (line) => line.heartbeat()),
   );
 
-  return { line, server };
+  const close = () => {
+    for (const line of lines.values()) {
+      try {
+        line.close();
+      } catch {}
+    }
+    lines.clear();
+  };
+  return { close, server };
 }
 
 export async function runMcp(): Promise<void> {
-  const { line, server } = createMcpServer();
+  const created = createMcpServer();
   const close = () => {
     try {
-      line.close();
+      created.close();
     } catch {}
   };
   process.once('exit', close);
@@ -185,5 +222,5 @@ export async function runMcp(): Promise<void> {
     close();
     process.exit(143);
   });
-  await server.connect(new StdioServerTransport());
+  await created.server.connect(new StdioServerTransport());
 }

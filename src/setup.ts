@@ -14,8 +14,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { applyEdits, modify, type ParseError, parse } from 'jsonc-parser';
+import { parse as parseToml } from 'smol-toml';
 
 import { OPENCODE_CAPTURE_PLUGIN, OPENCODE_TUI_PLUGIN } from './adapters.js';
+import {
+  CODEX_HOOKS,
+  CODEX_MINIMUM_VERSION,
+  CODEX_PROJECT_BLOCK,
+  CODEX_PROJECT_END,
+  CODEX_PROJECT_START,
+  type CodexHookEvent,
+  codexHooksFeatureEnabled,
+  codexMcpRegistrationConfigured,
+  codexVersionSupported,
+} from './codex.js';
 import { openDatabase } from './database.js';
 import { ClankChatError } from './errors.js';
 import { writeTextFileAtomic } from './files.js';
@@ -62,6 +74,7 @@ export interface SetupResult {
 export interface SetupOptions {
   cwd?: string;
   claude?: boolean;
+  codex?: boolean;
   opencode?: boolean;
   homeDirectory?: string;
   commandRunner?: (command: string, args: string[], cwd: string) => SetupCommandResult;
@@ -288,6 +301,178 @@ function configureOpenCodeServer(root: string, relative: string, apply = true): 
   return setJsoncValue(root, relative, ['mcp', 'clankchat'], MCP_SERVER, apply);
 }
 
+function configureCodexProject(root: string, apply: boolean): boolean {
+  const target = assertSafeWritePath(root, '.codex/config.toml');
+  const original = readText(target) ?? '';
+  const start = original.indexOf(CODEX_PROJECT_START);
+  const end = original.indexOf(CODEX_PROJECT_END);
+  if (
+    start < 0 !== end < 0 ||
+    (start >= 0 &&
+      (end < start ||
+        original.indexOf(CODEX_PROJECT_START, start + CODEX_PROJECT_START.length) >= 0 ||
+        original.indexOf(CODEX_PROJECT_END, end + CODEX_PROJECT_END.length) >= 0))
+  ) {
+    throw new ClankChatError('SETUP_ERROR', 'The Codex integration marker is malformed.', {
+      path: target,
+    });
+  }
+  let updated: string;
+  if (start >= 0) {
+    updated = `${original.slice(0, start)}${CODEX_PROJECT_BLOCK}${original.slice(
+      end + CODEX_PROJECT_END.length,
+    )}`;
+  } else {
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = parseToml(original) as Record<string, unknown>;
+    } catch (error) {
+      throw new ClankChatError('SETUP_ERROR', 'Could not parse the Codex configuration.', {
+        path: target,
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const servers = parsed.mcp_servers;
+    if (
+      typeof servers === 'object' &&
+      servers !== null &&
+      Reflect.get(servers, 'clankchat') !== undefined
+    ) {
+      throw new ClankChatError(
+        'SETUP_ERROR',
+        'Codex already has a conflicting clankchat MCP server.',
+        {
+          path: target,
+        },
+      );
+    }
+    updated = `${original.trimEnd()}${original.trim() ? '\n\n' : ''}${CODEX_PROJECT_BLOCK}\n`;
+  }
+  if (!updated.endsWith('\n')) updated += '\n';
+  try {
+    const parsed = parseToml(updated) as Record<string, unknown>;
+    const servers = parsed.mcp_servers;
+    const registration =
+      typeof servers === 'object' && servers !== null
+        ? Reflect.get(servers, 'clankchat')
+        : undefined;
+    if (!codexMcpRegistrationConfigured(registration)) throw new Error('MCP block was extended.');
+  } catch (error) {
+    throw new ClankChatError('SETUP_ERROR', 'Could not update the Codex configuration safely.', {
+      path: target,
+      cause: error instanceof Error ? error.message : String(error),
+    });
+  }
+  if (updated === original && existsSync(target)) return false;
+  if (apply) {
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeTextFileAtomic(target, updated);
+  }
+  return true;
+}
+
+function hookCommand(entry: unknown): string | null {
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
+  const hooks = Reflect.get(entry, 'hooks');
+  if (!Array.isArray(hooks) || hooks.length !== 1) return null;
+  const hook = hooks[0];
+  if (typeof hook !== 'object' || hook === null || Array.isArray(hook)) return null;
+  const command = Reflect.get(hook, 'command');
+  return typeof command === 'string' ? command : null;
+}
+
+function configureCodexHooks(codexHome: string, apply: boolean): boolean {
+  const target = assertSafeWritePath(codexHome, 'hooks.json');
+  const original = readText(target) ?? '{}\n';
+  const parsed = parseJsonc(original, target) as Record<string, unknown>;
+  const currentHooks = parsed.hooks;
+  if (currentHooks !== undefined && (typeof currentHooks !== 'object' || currentHooks === null)) {
+    throw new ClankChatError('SETUP_ERROR', 'Codex has an incompatible hooks value.', {
+      path: target,
+    });
+  }
+  const hooks = { ...((currentHooks ?? {}) as Record<string, unknown>) };
+  for (const event of Object.keys(CODEX_HOOKS) as CodexHookEvent[]) {
+    const current = hooks[event];
+    if (current !== undefined && !Array.isArray(current)) {
+      throw new ClankChatError('SETUP_ERROR', 'Codex has an incompatible hook event value.', {
+        path: target,
+        event,
+      });
+    }
+    const command = `clankchat hook codex --event ${event}`;
+    const entries = (current ?? []) as unknown[];
+    const unrelated = entries.filter((entry) => hookCommand(entry) !== command);
+    const combined = entries.find((entry) => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false;
+      const handlers = Reflect.get(entry, 'hooks');
+      return (
+        Array.isArray(handlers) &&
+        handlers.length !== 1 &&
+        handlers.some(
+          (handler) =>
+            typeof handler === 'object' &&
+            handler !== null &&
+            Reflect.get(handler, 'command') === command,
+        )
+      );
+    });
+    if (combined) {
+      throw new ClankChatError('SETUP_ERROR', 'A clankchat Codex hook shares an unowned entry.', {
+        path: target,
+        event,
+      });
+    }
+    hooks[event] = [...unrelated, CODEX_HOOKS[event]];
+  }
+  const updated = applyEdits(
+    original,
+    modify(original, ['hooks'], hooks, {
+      formattingOptions: { insertSpaces: true, tabSize: 2 },
+    }),
+  );
+  const content = updated.endsWith('\n') ? updated : `${updated}\n`;
+  if (content === original && existsSync(target)) return false;
+  if (apply) {
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeTextFileAtomic(target, content, 0o600);
+  }
+  return true;
+}
+
+function assertCodexVersion(version: SetupCommandResult): void {
+  if (version.status !== 0 || !codexVersionSupported(version.stdout)) {
+    throw new ClankChatError(
+      'SETUP_ERROR',
+      `Codex CLI ${CODEX_MINIMUM_VERSION} or newer is required.`,
+      { status: version.status, version: version.stdout.trim(), stderr: version.stderr.trim() },
+    );
+  }
+}
+
+function assertCodexHooksEnabled(features: SetupCommandResult): void {
+  if (features.status !== 0 || !codexHooksFeatureEnabled(features.stdout)) {
+    throw new ClankChatError('SETUP_ERROR', 'Codex hooks must be enabled.', {
+      status: features.status,
+      hooks: features.stdout.trim(),
+      stderr: features.stderr.trim(),
+    });
+  }
+}
+
+function configureCodex(root: string, codexHome: string): void {
+  configureCodexHooks(codexHome, true);
+  configureCodexProject(root, true);
+}
+
+function codexHomeDirectory(home: string, explicitHome: boolean): string {
+  return path.resolve(
+    explicitHome
+      ? path.join(home, '.codex')
+      : (process.env.CODEX_HOME ?? path.join(home, '.codex')),
+  );
+}
+
 function cleanupMachine(
   root: string,
   home: string,
@@ -391,7 +576,7 @@ function configureClaude(root: string, runner: NonNullable<SetupOptions['command
   if (existingMcp.status === 0 && !/^\s*Command:\s+clankchat-mcp\s*$/imu.test(existingMcp.stdout)) {
     throw new ClankChatError('SETUP_ERROR', 'Claude Code has a conflicting clankchat MCP server.');
   }
-  const packageRoot = fileURLToPath(new URL('..', import.meta.url));
+  const packageRoot = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
   const marketplaces = commandArray(
     runner('claude', ['plugin', 'marketplace', 'list', '--json'], root),
     'Could not inspect Claude Code marketplaces.',
@@ -584,17 +769,46 @@ function acquireSetupLock(lockPath: string): { descriptor: number; token: string
 
 export function setup(options: SetupOptions = {}): SetupResult {
   const repository = resolveRepository(options.cwd);
+  const configureAll =
+    options.claude === undefined && options.codex === undefined && options.opencode === undefined;
+  const useClaude = configureAll || options.claude === true;
+  const useOpenCode = configureAll || options.opencode === true;
+  const home = options.homeDirectory ?? os.homedir();
+  const runner = options.commandRunner ?? defaultRunner;
+  const inspectedCodex =
+    configureAll || options.codex === true ? runner('codex', ['--version'], repository.root) : null;
+  if (options.codex === true && inspectedCodex) assertCodexVersion(inspectedCodex);
+  const inspectedHooks =
+    inspectedCodex?.status === 0 && codexVersionSupported(inspectedCodex.stdout)
+      ? runner('codex', ['features', 'list'], repository.root)
+      : null;
+  if (options.codex === true && inspectedHooks) assertCodexHooksEnabled(inspectedHooks);
+  const useCodex =
+    options.codex === true ||
+    (configureAll &&
+      inspectedCodex?.status === 0 &&
+      codexVersionSupported(inspectedCodex.stdout) &&
+      inspectedHooks?.status === 0 &&
+      codexHooksFeatureEnabled(inspectedHooks.stdout));
+  const codexHome = codexHomeDirectory(home, options.homeDirectory !== undefined);
   const lockPath = path.join(repository.commonGitDirectory, 'clankchat', 'setup.lock');
   mkdirSync(path.dirname(lockPath), { recursive: true, mode: 0o700 });
   const lock = acquireSetupLock(lockPath);
+  let codexLock: { descriptor: number; token: string; path: string } | null = null;
 
   try {
+    if (useCodex) {
+      if (existsSync(codexHome) && lstatSync(codexHome).isSymbolicLink()) {
+        throw new ClankChatError('SETUP_ERROR', 'Refusing to use a symlinked Codex home.', {
+          path: codexHome,
+        });
+      }
+      mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+      const codexLockPath = assertSafeWritePath(codexHome, 'clankchat-setup.lock');
+      codexLock = { ...acquireSetupLock(codexLockPath), path: codexLockPath };
+    }
     const database = openDatabase(repository.databasePath);
     database.close();
-    const configureBoth = options.claude === undefined && options.opencode === undefined;
-    const useClaude = configureBoth || options.claude === true;
-    const useOpenCode = configureBoth || options.opencode === true;
-    const home = options.homeDirectory ?? os.homedir();
     cleanupMachine(repository.root, home, useClaude, useOpenCode, false);
     const configured: string[] = [];
     const localPath = 'CLAUDE.local.md';
@@ -604,13 +818,22 @@ export function setup(options: SetupOptions = {}): SetupResult {
       : '';
     const claudeContent = `${current.trimEnd()}${current.trim() ? '\n\n' : ''}${INSTRUCTIONS}`;
     if (useClaude) writeProjectFile(repository.root, localPath, claudeContent, undefined, false);
+    if (useCodex) {
+      configureCodexHooks(codexHome, false);
+      configureCodexProject(repository.root, false);
+    }
     const openCode = useOpenCode ? openCodeFiles(repository.root) : null;
     if (openCode) configureOpenCodeFiles(repository.root, openCode, false);
 
     if (useClaude) {
-      configureClaude(repository.root, options.commandRunner ?? defaultRunner);
+      configureClaude(repository.root, runner);
       writeProjectFile(repository.root, localPath, claudeContent);
       configured.push('claude-code');
+    }
+
+    if (useCodex) {
+      configureCodex(repository.root, codexHome);
+      configured.push('codex');
     }
 
     if (openCode) {
@@ -634,6 +857,10 @@ export function setup(options: SetupOptions = {}): SetupResult {
       restartRequired: [...configured],
     };
   } finally {
+    if (codexLock) {
+      closeSync(codexLock.descriptor);
+      if (readText(codexLock.path) === codexLock.token) rmSync(codexLock.path, { force: true });
+    }
     closeSync(lock.descriptor);
     if (readText(lockPath) === lock.token) rmSync(lockPath, { force: true });
   }

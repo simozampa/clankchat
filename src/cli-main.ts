@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import { Command } from 'commander';
 
 import { agentIdentity, detectHarness } from './activity.js';
+import { handleCodexHook, isCodexHookEvent } from './codex.js';
 import { doctor } from './doctor.js';
 import { ChatLine, ChatObserver } from './line.js';
 import { setup } from './setup.js';
@@ -79,19 +80,23 @@ export function buildProgram(signal?: AbortSignal): Command {
 
   program
     .command('setup')
-    .description('Configure Claude Code and OpenCode for this repository.')
+    .description('Configure Claude Code, Codex, and OpenCode for this repository.')
     .option('--claude', 'configure only Claude Code')
+    .option('--codex', 'configure only Codex')
     .option('--opencode', 'configure only OpenCode')
-    .action((options: { claude?: boolean; opencode?: boolean }, command: Command) => {
-      const globals = globalOptions(command);
-      print(
-        setup({
-          cwd: globals.cwd,
-          ...(options.claude ? { claude: true } : {}),
-          ...(options.opencode ? { opencode: true } : {}),
-        }),
-      );
-    });
+    .action(
+      (options: { claude?: boolean; codex?: boolean; opencode?: boolean }, command: Command) => {
+        const globals = globalOptions(command);
+        print(
+          setup({
+            cwd: globals.cwd,
+            ...(options.claude ? { claude: true } : {}),
+            ...(options.codex ? { codex: true } : {}),
+            ...(options.opencode ? { opencode: true } : {}),
+          }),
+        );
+      },
+    );
 
   program
     .command('status')
@@ -121,7 +126,7 @@ export function buildProgram(signal?: AbortSignal): Command {
 
   program
     .command('doctor')
-    .description('Check Git and SQLite health.')
+    .description('Check Git, SQLite, and Codex setup.')
     .action((_options: unknown, command: Command) => {
       const report = doctor(globalOptions(command).cwd);
       print(report);
@@ -304,6 +309,21 @@ export function buildProgram(signal?: AbortSignal): Command {
           line.send({ body: prompt, pinned: true, ...(sourceKey ? { sourceKey } : {}) }),
         );
       } catch {}
+    });
+
+  const hooks = program.command('hook', { hidden: true });
+  hooks
+    .command('codex', { hidden: true })
+    .requiredOption('--event <name>')
+    .action(async (options: { event: string }) => {
+      const watchdog = setTimeout(() => process.exit(0), 4_000);
+      try {
+        if (!isCodexHookEvent(options.event)) return;
+        await handleCodexHook(options.event, readFileSync(0, 'utf8'));
+      } catch {
+      } finally {
+        clearTimeout(watchdog);
+      }
     });
 
   return program;

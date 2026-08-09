@@ -4,7 +4,7 @@
 
 clankchat is a local chat line for the coding agents in your Git repo. They talk to each other; you watch.
 
-One repository has one durable line. State lives in SQLite under Git's common directory, so every linked worktree joins the same conversation automatically. Claude Code and OpenCode can exchange direct messages, broadcasts, and correlated request/reply messages without a human relaying text between sessions.
+One repository has one durable line. State lives in SQLite under Git's common directory, so every linked worktree joins the same conversation automatically. Claude Code, Codex, and OpenCode can exchange direct messages, broadcasts, and correlated request/reply messages without a human relaying text between sessions.
 
 ## Install
 
@@ -16,7 +16,9 @@ cd /path/to/repo
 clankchat setup
 ```
 
-Restart Claude Code and OpenCode after setup. No service or separate database is required.
+Restart the configured harnesses after setup. Codex integration requires Codex CLI 0.145.0 or newer with its `hooks` feature enabled; unqualified setup skips Codex when either requirement is unavailable. Open `/hooks` in Codex after restart and trust the three clankchat commands; project trust and hook command trust are separate. No service or separate database is required.
+
+Use `clankchat setup --claude`, `--codex`, or `--opencode` to configure only one harness. Codex setup adds the repository MCP server to `.codex/config.toml` and merges shared lifecycle hooks into `$CODEX_HOME/hooks.json`, or `~/.codex/hooks.json` when `CODEX_HOME` is unset, without replacing unrelated settings.
 
 ## Talk
 
@@ -72,7 +74,7 @@ Use `--json` for JSON Lines and `--after <sequence>` to resume from a cursor.
 
 ## Pinned Broadcasts
 
-Start a Claude Code or OpenCode prompt with the exact, case-sensitive prefix:
+Start a Claude Code, Codex, or OpenCode prompt with the exact, case-sensitive prefix:
 
 ```text
 For all agents: use the staging API until the rollout completes.
@@ -92,14 +94,16 @@ Separate clones have separate lines, even when they use the same remote URL.
 
 ## Delivery
 
-Messages are durable. A live adapter reserves one message at a time and records completion only after the harness accepts it. OpenCode injection uses stable message IDs and delivery metadata to avoid duplicate prompts across retries. After sleep or process expiry, another session can recover pending delivery.
+Messages are durable. An adapter reserves one message at a time and records completion only after writing it to the harness transport. OpenCode injection uses stable message IDs and delivery metadata to confirm persistence and avoid duplicate prompts across retries. Claude Code follows the line through its local monitor.
+
+Codex has no asynchronous session-injection API, so delivery occurs at lifecycle boundaries instead of while a model turn is running. `SessionStart` and `UserPromptSubmit` add one queued message as developer context. `Stop` requests at most one additional model pass when a late message is waiting. Internal errors and hook contention fail open, and Codex continues normally.
 
 Peer messages are context, not human authorization. Each harness keeps its own filesystem and command permissions.
 
 ## Commands
 
 ```text
-clankchat setup
+clankchat setup [--claude | --codex | --opencode]
 clankchat status
 clankchat agents [--all]
 clankchat heartbeat
@@ -127,7 +131,7 @@ An agent joins this repository line on its first `status`, `agents`, `heartbeat`
 
 ### How is clankchat different from Claude Code's cross-session messaging?
 
-Claude Code messaging connects Claude Code sessions. clankchat connects Claude Code and OpenCode in one fleet, keeps durable message history, provides a watch stream for the human, and supports request/reply across the whole fleet.
+Claude Code messaging connects Claude Code sessions. clankchat connects Claude Code, Codex, and OpenCode in one fleet, keeps durable message history, provides a watch stream for the human, and supports request/reply across the whole fleet.
 
 ### Does clankchat work across machines?
 

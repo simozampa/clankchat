@@ -1,11 +1,19 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { parse } from 'jsonc-parser';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveRepository } from '../src/git.js';
 import { type SetupCommandResult, setup } from '../src/setup.js';
@@ -14,6 +22,7 @@ import { repository, type TestRepository } from './helpers.js';
 const repositories: TestRepository[] = [];
 const homes: string[] = [];
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const entry of repositories.splice(0)) entry.cleanup();
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
 });
@@ -27,6 +36,12 @@ function fixture(): { root: string; home: string; commands: string[][] } {
 }
 
 function commandResult(command: string, args: string[]): SetupCommandResult {
+  if (command === 'codex' && args.join(' ') === '--version') {
+    return { status: 0, stdout: 'codex-cli 0.147.0\n', stderr: '' };
+  }
+  if (command === 'codex' && args.join(' ') === 'features list') {
+    return { status: 0, stdout: 'hooks stable true\n', stderr: '' };
+  }
   if (command === 'claude' && args.join(' ') === 'mcp get clankchat') {
     return { status: 1, stdout: '', stderr: 'not found' };
   }
@@ -37,7 +52,7 @@ function commandResult(command: string, args: string[]): SetupCommandResult {
 }
 
 describe('setup', () => {
-  it('configures both harnesses and removes stale integration data surgically', () => {
+  it('configures all harnesses and removes stale integration data surgically', () => {
     const { root, home, commands } = fixture();
     mkdirSync(path.join(root, '.opencode', 'plugins'), { recursive: true });
     mkdirSync(path.join(root, '.sametree'), { recursive: true });
@@ -77,7 +92,7 @@ describe('setup', () => {
       },
     });
 
-    expect(result.configured).toEqual(['claude-code', 'opencode']);
+    expect(result.configured).toEqual(['claude-code', 'codex', 'opencode']);
     expect(result.removedStaleConfiguration).toBe(true);
     expect(result.databasePath).toContain('/clankchat/state.sqlite3');
     expect(existsSync(path.join(root, '.sametree'))).toBe(false);
@@ -98,6 +113,12 @@ describe('setup', () => {
       false,
     );
     expect(commands.some((entry) => entry.includes('clankchat@clankchat'))).toBe(true);
+    expect(readFileSync(path.join(root, '.codex', 'config.toml'), 'utf8')).toContain(
+      '[mcp_servers.clankchat]',
+    );
+    expect(readFileSync(path.join(home, '.codex', 'hooks.json'), 'utf8')).toContain(
+      'clankchat hook codex --event Stop',
+    );
   });
 
   it('is idempotent on repeated setup', () => {
@@ -111,11 +132,192 @@ describe('setup', () => {
       '.opencode/clankchat-tui.ts',
       '.opencode/plugins/clankchat.ts',
       '.opencode/tui.json',
+      '.codex/config.toml',
     ];
     const before = files.map((file) => readFileSync(path.join(root, file), 'utf8'));
+    const hooksBefore = readFileSync(path.join(home, '.codex', 'hooks.json'), 'utf8');
     const second = setup(options);
     expect(second.removedStaleConfiguration).toBe(false);
     expect(files.map((file) => readFileSync(path.join(root, file), 'utf8'))).toEqual(before);
+    expect(readFileSync(path.join(home, '.codex', 'hooks.json'), 'utf8')).toBe(hooksBefore);
+  });
+
+  it('preserves unrelated Codex config and shared hooks', () => {
+    const { root, home } = fixture();
+    mkdirSync(path.join(root, '.codex'), { recursive: true });
+    mkdirSync(path.join(home, '.codex'), { recursive: true });
+    writeFileSync(path.join(root, '.codex', 'config.toml'), 'model = "gpt-5"\n');
+    writeFileSync(
+      path.join(home, '.codex', 'hooks.json'),
+      `${JSON.stringify({
+        description: 'keep me',
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: 'notify-send stopped', timeout: 2 }] }],
+        },
+      })}\n`,
+    );
+
+    const result = setup({
+      cwd: root,
+      homeDirectory: home,
+      codex: true,
+      commandRunner: commandResult,
+    });
+
+    expect(result.configured).toEqual(['codex']);
+    const config = readFileSync(path.join(root, '.codex', 'config.toml'), 'utf8');
+    expect(config).toContain('model = "gpt-5"');
+    expect(config).toContain('[mcp_servers.clankchat]');
+    expect(config).toContain('CLANKCHAT_CODEX = "1"');
+    const hooks = JSON.parse(readFileSync(path.join(home, '.codex', 'hooks.json'), 'utf8')) as {
+      description: string;
+      hooks: Record<string, Array<{ hooks: Array<{ command: string; args?: unknown }> }>>;
+    };
+    expect(hooks.description).toBe('keep me');
+    expect((hooks.hooks.Stop ?? []).map((entry) => entry.hooks[0]?.command)).toEqual([
+      'notify-send stopped',
+      'clankchat hook codex --event Stop',
+    ]);
+    expect(hooks.hooks.SessionStart?.[0]?.hooks[0]?.args).toBeUndefined();
+  });
+
+  it('rejects old Codex and conflicting project MCP configuration before writing', () => {
+    const { root, home } = fixture();
+    expect(() =>
+      setup({
+        cwd: root,
+        homeDirectory: home,
+        codex: true,
+        commandRunner: () => ({ status: 0, stdout: 'codex-cli 0.144.0\n', stderr: '' }),
+      }),
+    ).toThrow(/0\.145\.0/u);
+    expect(existsSync(path.join(root, '.codex', 'config.toml'))).toBe(false);
+    expect(existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(false);
+
+    mkdirSync(path.join(root, '.codex'), { recursive: true });
+    writeFileSync(
+      path.join(root, '.codex', 'config.toml'),
+      '[mcp_servers]\nclankchat = { command = "mine" }\n',
+    );
+    expect(() =>
+      setup({ cwd: root, homeDirectory: home, codex: true, commandRunner: commandResult }),
+    ).toThrow(/conflicting/u);
+    expect(existsSync(path.join(home, '.codex', 'hooks.json'))).toBe(false);
+  });
+
+  it('rejects disabled Codex hooks and semantic extensions to its MCP block', () => {
+    const { root, home } = fixture();
+    expect(() =>
+      setup({
+        cwd: root,
+        homeDirectory: home,
+        codex: true,
+        commandRunner: (_command, args) => ({
+          status: 0,
+          stdout: args[0] === '--version' ? 'codex-cli 0.147.0\n' : 'hooks stable false\n',
+          stderr: '',
+        }),
+      }),
+    ).toThrow(/hooks must be enabled/u);
+    expect(existsSync(path.join(root, '.codex', 'config.toml'))).toBe(false);
+
+    setup({ cwd: root, homeDirectory: home, codex: true, commandRunner: commandResult });
+    const configPath = path.join(root, '.codex', 'config.toml');
+    writeFileSync(configPath, `${readFileSync(configPath, 'utf8')}enabled = false\n`);
+    expect(() =>
+      setup({ cwd: root, homeDirectory: home, codex: true, commandRunner: commandResult }),
+    ).toThrow(/safely/u);
+  });
+
+  it('keeps default setup compatible when Codex is unavailable', () => {
+    const { root, home } = fixture();
+    const result = setup({
+      cwd: root,
+      homeDirectory: home,
+      commandRunner: (command, args) =>
+        command === 'codex'
+          ? { status: null, stdout: '', stderr: 'not found' }
+          : commandResult(command, args),
+    });
+
+    expect(result.configured).toEqual(['claude-code', 'opencode']);
+    expect(existsSync(path.join(root, '.codex', 'config.toml'))).toBe(false);
+    expect(existsSync(path.join(home, '.codex'))).toBe(false);
+  });
+
+  it('uses CODEX_HOME and preserves unrelated clankchat TOML keys', () => {
+    const { root } = fixture();
+    const codexHome = mkdtempSync(path.join(tmpdir(), 'clankchat-codex-home-'));
+    homes.push(codexHome);
+    vi.stubEnv('CODEX_HOME', codexHome);
+    mkdirSync(path.join(root, '.codex'), { recursive: true });
+    writeFileSync(path.join(root, '.codex', 'config.toml'), 'clankchat = "note"\n');
+
+    setup({ cwd: root, codex: true, commandRunner: commandResult });
+
+    expect(existsSync(path.join(codexHome, 'hooks.json'))).toBe(true);
+    expect(readFileSync(path.join(root, '.codex', 'config.toml'), 'utf8')).toContain(
+      'clankchat = "note"',
+    );
+  });
+
+  it('refuses a symlinked Codex home', () => {
+    const { root, home } = fixture();
+    const target = mkdtempSync(path.join(tmpdir(), 'clankchat-codex-target-'));
+    homes.push(target);
+    symlinkSync(target, path.join(home, '.codex'));
+
+    expect(() =>
+      setup({ cwd: root, homeDirectory: home, codex: true, commandRunner: commandResult }),
+    ).toThrow(/symlinked Codex home/u);
+    expect(existsSync(path.join(target, 'hooks.json'))).toBe(false);
+  });
+
+  it('recognizes its directory marketplace with a trailing separator', () => {
+    const { root, home, commands } = fixture();
+    const packageRoot = path.resolve('.');
+    const result = setup({
+      cwd: root,
+      homeDirectory: home,
+      claude: true,
+      commandRunner: (command, args) => {
+        commands.push([command, ...args]);
+        if (args.join(' ') === 'mcp get clankchat') {
+          return { status: 0, stdout: 'Scope: Local config\nCommand: clankchat-mcp\n', stderr: '' };
+        }
+        if (args.join(' ') === 'plugin marketplace list --json') {
+          return {
+            status: 0,
+            stdout: JSON.stringify([
+              { name: 'clankchat', source: 'directory', path: `${packageRoot}${path.sep}` },
+            ]),
+            stderr: '',
+          };
+        }
+        if (args.join(' ') === 'plugin list --json') {
+          return {
+            status: 0,
+            stdout: JSON.stringify([
+              {
+                id: 'clankchat@clankchat',
+                scope: 'user',
+                version: '0.1.2',
+                enabled: true,
+              },
+            ]),
+            stderr: '',
+          };
+        }
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    });
+
+    expect(result.configured).toEqual(['claude-code']);
+    expect(
+      commands.some(
+        (entry) => entry[1] === 'plugin' && entry[2] === 'marketplace' && entry[3] === 'add',
+      ),
+    ).toBe(false);
   });
 
   it('refuses concurrent setup for the same clone', () => {
