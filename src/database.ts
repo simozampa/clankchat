@@ -14,7 +14,9 @@ const { DatabaseSync: NodeDatabaseSync } = await import('node:sqlite').finally((
 });
 
 const SCHEMA_VERSION = 1;
+const BUSY_TIMEOUT_MS = 15_000;
 const APPLICATION_ID = 0x434c_4e4b;
+const busyWait = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS agents (
   name TEXT PRIMARY KEY,
@@ -193,9 +195,29 @@ function inspectOwnership(database: DatabaseSync): { applicationId: number; vers
   return { applicationId, version };
 }
 
+function isBusyError(error: unknown): boolean {
+  const code = error instanceof Error ? String(Reflect.get(error, 'code') ?? '') : '';
+  const message = error instanceof Error ? error.message : '';
+  return code.includes('BUSY') || code.includes('LOCKED') || /busy|locked/iu.test(message);
+}
+
+function enableWal(database: DatabaseSync): void {
+  const deadline = Date.now() + BUSY_TIMEOUT_MS;
+  for (;;) {
+    try {
+      database.exec('PRAGMA journal_mode = WAL');
+      return;
+    } catch (error) {
+      if (!isBusyError(error) || Date.now() >= deadline) throw error;
+      Atomics.wait(busyWait, 0, 0, 25);
+    }
+  }
+}
+
 export function openDatabase(databasePath: string): DatabaseSync {
   ensureSafeParent(databasePath);
   let database: DatabaseSync | null = null;
+  let phase = 'preflight';
   try {
     if (pathState(databasePath)) {
       const readOnly = new NodeDatabaseSync(databasePath, { readOnly: true });
@@ -205,14 +227,20 @@ export function openDatabase(databasePath: string): DatabaseSync {
         readOnly.close();
       }
     }
+    phase = 'open';
     database = new NodeDatabaseSync(databasePath);
+    phase = 'inspect';
     inspectOwnership(database);
+    phase = 'pragmas';
     database.exec(`
-      PRAGMA busy_timeout = 15000;
+      PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};
       PRAGMA foreign_keys = ON;
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = FULL;
     `);
+    phase = 'journal';
+    enableWal(database);
+    phase = 'pragmas';
+    database.exec('PRAGMA synchronous = FULL');
+    phase = 'transaction';
     database.exec('BEGIN IMMEDIATE');
     try {
       const ownership = inspectOwnership(database);
@@ -235,16 +263,12 @@ export function openDatabase(databasePath: string): DatabaseSync {
       database?.close();
     } catch {}
     if (error instanceof ClankerChatError) throw error;
-    const code = error instanceof Error ? String(Reflect.get(error, 'code') ?? '') : '';
     const message =
       error instanceof Error ? error.message : 'Could not open the clankerchat database.';
-    throw new ClankerChatError(
-      code.includes('BUSY') || code.includes('LOCKED') || /busy|locked/iu.test(message)
-        ? 'DATABASE_BUSY'
-        : 'DATABASE_ERROR',
-      message,
-      { path: databasePath },
-    );
+    throw new ClankerChatError(isBusyError(error) ? 'DATABASE_BUSY' : 'DATABASE_ERROR', message, {
+      path: databasePath,
+      phase,
+    });
   }
 }
 

@@ -234,7 +234,7 @@ describe('repository chat line', () => {
           line.close();
         `;
         const child = spawn(process.execPath, ['--input-type=module', '--eval', source], {
-          stdio: 'ignore',
+          stdio: ['ignore', 'ignore', 'inherit'],
         });
         child.once('exit', resolve);
       });
