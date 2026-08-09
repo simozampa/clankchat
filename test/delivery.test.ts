@@ -11,6 +11,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   if (originalBun === undefined) Reflect.deleteProperty(globalThis, 'Bun');
   else Reflect.set(globalThis, 'Bun', originalBun);
+  Reflect.deleteProperty(globalThis, Symbol.for('clankerchat.tui.active'));
+  Reflect.deleteProperty(globalThis, Symbol.for('clankerchat.capture.active'));
   for (const entry of repositories.splice(0)) entry.cleanup();
 });
 
@@ -111,6 +113,30 @@ describe('live delivery', () => {
     second.close();
   });
 
+  it('revalidates a harness binding before emitting a reserved message', async () => {
+    const { sender, first, second } = lines();
+    const sent = sender.send({ to: 'receiver', body: 'Stay fenced.' });
+    let checks = 0;
+    const output: string[] = [];
+    await expect(
+      followMessages(first, {
+        once: true,
+        write: (value) => {
+          output.push(value);
+        },
+        assertActive: () => {
+          checks += 1;
+          if (checks === 3) throw new Error('binding changed');
+        },
+      }),
+    ).rejects.toThrow(/binding changed/u);
+    expect(output).toEqual([]);
+    expect(second.reserveNextDelivery()?.id).toBe(sent.id);
+    sender.close();
+    first.close();
+    second.close();
+  });
+
   it('renders request reply instructions for OpenCode', async () => {
     const module = (await import(
       `data:text/javascript;base64,${Buffer.from(OPENCODE_TUI_PLUGIN).toString('base64')}`
@@ -138,10 +164,16 @@ describe('live delivery', () => {
     expect(OPENCODE_TUI_PLUGIN).toContain('message.deliveryScope');
     expect(OPENCODE_TUI_PLUGIN).toContain('await persisted');
     expect(OPENCODE_TUI_PLUGIN).toContain('ack-stdin');
+    expect(OPENCODE_TUI_PLUGIN).toContain('clankerchat.tui.active');
+    expect(OPENCODE_TUI_PLUGIN).toContain('"--scope", selectedScope');
+    expect(OPENCODE_TUI_PLUGIN).toContain('AbortSignal.any');
+    expect(OPENCODE_TUI_PLUGIN).toContain('if (!(await bindingIsCurrent()))');
     expect(OPENCODE_TUI_PLUGIN).not.toContain('sametreeDeliveryKey');
   });
 
   it('injects once, confirms persistence, and acknowledges downstream', async () => {
+    vi.stubEnv('CLANKERCHAT_SCOPE', 'repository');
+    vi.stubEnv('OPENCODE_PID', '');
     const module = (await import(
       `data:text/javascript;base64,${Buffer.from(OPENCODE_TUI_PLUGIN).toString('base64')}`
     )) as { default: { tui: (api: Record<string, unknown>) => Promise<void> } };
@@ -172,12 +204,14 @@ describe('live delivery', () => {
     let persisted = false;
     let promptedPartId = '';
     let spawnedSession = '';
+    let spawnedArguments: unknown[] = [];
     let finish: () => void = () => undefined;
     const completed = new Promise<void>((resolve) => {
       finish = resolve;
     });
     Reflect.set(globalThis, 'Bun', {
-      spawn: (_args: unknown, options: { env: Record<string, string> }) => {
+      spawn: (args: unknown[], options: { env: Record<string, string> }) => {
+        spawnedArguments = args;
         spawnedSession = options.env.CLANKERCHAT_SESSION ?? '';
         return {
           stdout,
@@ -252,5 +286,6 @@ describe('live delivery', () => {
     });
     expect(acknowledgements).toEqual(['message-1\n']);
     expect(spawnedSession).toMatch(/^opencode-/u);
+    expect(spawnedArguments).toEqual(expect.arrayContaining(['--scope', 'repository']));
   });
 });

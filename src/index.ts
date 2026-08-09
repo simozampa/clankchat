@@ -24,7 +24,19 @@ export {
   isClankChatError,
   isClankerChatError,
 } from './errors.js';
-export { resolveRepository } from './git.js';
+export type {
+  GlobalLineContext,
+  LineContext,
+  LineScope,
+  RepositoryContext,
+  RepositoryLineContext,
+} from './git.js';
+export {
+  globalStateDirectory,
+  parseLineScope,
+  resolveLineContext,
+  resolveRepository,
+} from './git.js';
 export { ChatLine, ChatObserver, validateAgentName } from './line.js';
 export { setup } from './setup.js';
 export type {

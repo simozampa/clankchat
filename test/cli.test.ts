@@ -5,17 +5,18 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { CODEX_PROJECT_BLOCK } from '../src/codex.js';
-import { repository, type TestRepository } from './helpers.js';
+import { directory, repository, type TestRepository } from './helpers.js';
 
 const repositories: TestRepository[] = [];
 afterEach(() => {
   for (const entry of repositories.splice(0)) entry.cleanup();
 });
 
-function run(root: string, agent: string, args: string[]) {
+function run(root: string, agent: string, args: string[], environment: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, ['dist/cli.js', '--cwd', root, '--agent', agent, ...args], {
     cwd: process.cwd(),
     encoding: 'utf8',
+    env: { ...process.env, ...environment },
   });
 }
 
@@ -26,7 +27,7 @@ describe('CLI', () => {
       encoding: 'utf8',
     });
     expect(result.status).toBe(0);
-    expect(result.stdout.trim()).toBe('0.1.0');
+    expect(result.stdout.trim()).toBe('0.1.1');
   });
 
   it('discovers agents and exchanges messages', () => {
@@ -50,6 +51,28 @@ describe('CLI', () => {
     expect(JSON.parse(run(created.root, 'alice', ['agents', '--all']).stdout)).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'bob' })]),
     );
+  });
+
+  it('selects a shared global line outside Git and validates explicit scope', () => {
+    const first = directory();
+    const second = directory();
+    const state = directory('clankerchat-cli-state-');
+    repositories.push(first, second, state);
+    const environment = { XDG_STATE_HOME: state.root };
+
+    const alice = run(first.root, 'alice', ['status'], environment);
+    const bob = run(second.root, 'bob', ['status'], environment);
+    expect(JSON.parse(alice.stdout)).toMatchObject({ scope: 'global', repositoryRoot: null });
+    expect(JSON.parse(bob.stdout).agents).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'alice' })]),
+    );
+
+    const strict = run(first.root, 'strict', ['--scope', 'repository', 'status'], environment);
+    expect(strict.status).not.toBe(0);
+    expect(strict.stderr).toContain('requires a Git working tree');
+    const invalid = run(first.root, 'invalid', ['--scope', 'elsewhere', 'status'], environment);
+    expect(invalid.status).not.toBe(0);
+    expect(invalid.stderr).toContain('auto, repository, or global');
   });
 
   it('keeps short-lived commands out of the presence stream', () => {
@@ -83,7 +106,12 @@ describe('CLI', () => {
     const result = spawnSync(
       process.execPath,
       ['dist/cli.js', 'hook', 'codex', '--event', 'SessionStart'],
-      { cwd: process.cwd(), encoding: 'utf8', input },
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, CODEX_HOME: path.join(created.root, '.codex-home') },
+        encoding: 'utf8',
+        input,
+      },
     );
     expect(result.status).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
@@ -93,7 +121,12 @@ describe('CLI', () => {
     const malformed = spawnSync(
       process.execPath,
       ['dist/cli.js', 'hook', 'codex', '--event', 'SessionStart'],
-      { cwd: process.cwd(), encoding: 'utf8', input: '{' },
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, CODEX_HOME: path.join(created.root, '.codex-home') },
+        encoding: 'utf8',
+        input: '{',
+      },
     );
     expect(malformed.status).toBe(0);
     expect(malformed.stdout).toBe('');
