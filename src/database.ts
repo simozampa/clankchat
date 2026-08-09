@@ -201,12 +201,11 @@ function isBusyError(error: unknown): boolean {
   return code.includes('BUSY') || code.includes('LOCKED') || /busy|locked/iu.test(message);
 }
 
-function enableWal(database: DatabaseSync): void {
+function withBusyRetry<T>(operation: () => T): T {
   const deadline = Date.now() + BUSY_TIMEOUT_MS;
   for (;;) {
     try {
-      database.exec('PRAGMA journal_mode = WAL');
-      return;
+      return operation();
     } catch (error) {
       if (!isBusyError(error) || Date.now() >= deadline) throw error;
       Atomics.wait(busyWait, 0, 0, 25);
@@ -220,44 +219,46 @@ export function openDatabase(databasePath: string): DatabaseSync {
   let phase = 'preflight';
   try {
     if (pathState(databasePath)) {
-      const readOnly = new NodeDatabaseSync(databasePath, { readOnly: true });
+      phase = 'preflight-open';
+      const readOnly = withBusyRetry(() => new NodeDatabaseSync(databasePath, { readOnly: true }));
       try {
-        inspectOwnership(readOnly);
+        readOnly.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+        phase = 'preflight-inspect';
+        withBusyRetry(() => inspectOwnership(readOnly));
       } finally {
         readOnly.close();
       }
     }
     phase = 'open';
-    database = new NodeDatabaseSync(databasePath);
+    const activeDatabase = withBusyRetry(() => new NodeDatabaseSync(databasePath));
+    database = activeDatabase;
+    activeDatabase.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     phase = 'inspect';
-    inspectOwnership(database);
+    withBusyRetry(() => inspectOwnership(activeDatabase));
     phase = 'pragmas';
-    database.exec(`
-      PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};
-      PRAGMA foreign_keys = ON;
-    `);
+    activeDatabase.exec('PRAGMA foreign_keys = ON');
     phase = 'journal';
-    enableWal(database);
+    withBusyRetry(() => activeDatabase.exec('PRAGMA journal_mode = WAL'));
     phase = 'pragmas';
-    database.exec('PRAGMA synchronous = FULL');
+    activeDatabase.exec('PRAGMA synchronous = FULL');
     phase = 'transaction';
-    database.exec('BEGIN IMMEDIATE');
+    activeDatabase.exec('BEGIN IMMEDIATE');
     try {
-      const ownership = inspectOwnership(database);
+      const ownership = inspectOwnership(activeDatabase);
       if (ownership.version === 0) {
-        database.exec(SCHEMA);
-        database.exec(
+        activeDatabase.exec(SCHEMA);
+        activeDatabase.exec(
           `PRAGMA application_id = ${APPLICATION_ID}; PRAGMA user_version = ${SCHEMA_VERSION};`,
         );
       } else if (ownership.applicationId === 0) {
-        database.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
+        activeDatabase.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
       }
-      database.exec('COMMIT');
+      activeDatabase.exec('COMMIT');
     } catch (error) {
-      database.exec('ROLLBACK');
+      activeDatabase.exec('ROLLBACK');
       throw error;
     }
-    return database;
+    return activeDatabase;
   } catch (error) {
     try {
       database?.close();
