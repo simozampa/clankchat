@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: clankerchat-npm-publish
+  cancel-in-progress: false
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -92,8 +96,34 @@ jobs:
           home="$(mktemp -d)"
           git -C "$repository" init
           HOME="$home" "$prefix/bin/clankerchat" --cwd "$repository" setup --opencode
+          outside="$(mktemp -d)"
+          state="$(mktemp -d)"
+          XDG_STATE_HOME="$state" "$prefix/bin/clankerchat" --cwd "$outside" --agent release-global status | node -e '
+            let input=""; process.stdin.on("data", (chunk) => input += chunk); process.stdin.on("end", () => {
+              if (JSON.parse(input).scope !== "global") process.exit(1);
+            });
+          '
+          if XDG_STATE_HOME="$state" "$prefix/bin/clankerchat" --cwd "$outside" --scope repository --agent strict status; then exit 1; fi
+          user_home="$(mktemp -d)"
+          HOME="$user_home" XDG_CONFIG_HOME="$user_home/config" XDG_STATE_HOME="$user_home/state" \
+            "$prefix/bin/clankerchat" --cwd "$outside" setup --user --opencode
+          test -f "$user_home/config/opencode/opencode.json"
           request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release","version":"1"}}}'
-          response="$(printf '%s\n' "$request" | CLANKERCHAT_CWD="$repository" CLANKERCHAT_AGENT=release-agent timeout 10 "$prefix/bin/clankerchat-mcp")"
+          response="$(CONFIG="$user_home/config/opencode/opencode.json" REQUEST="$request" REPOSITORY="$repository" node --input-type=module -e '
+            import { existsSync, readFileSync } from "node:fs";
+            import path from "node:path";
+            import { spawnSync } from "node:child_process";
+            const server = JSON.parse(readFileSync(process.env.CONFIG, "utf8")).mcp?.clankerchat;
+            if (!Array.isArray(server?.command) || server.command.length !== 2 ||
+                server.command.some((entry) => typeof entry !== "string" || !path.isAbsolute(entry)) ||
+                server.command.some((entry) => !existsSync(entry))) process.exit(1);
+            const result = spawnSync(server.command[0], server.command.slice(1), {
+              input: `${process.env.REQUEST}\n`, encoding: "utf8", timeout: 10_000,
+              env: { ...process.env, ...server.environment, CLANKERCHAT_CWD: process.env.REPOSITORY, CLANKERCHAT_AGENT: "release-agent" },
+            });
+            if (result.status !== 0) process.exit(1);
+            process.stdout.write(result.stdout);
+          ')"
           node -e 'const value=JSON.parse(process.argv[1]); if (value.result?.serverInfo?.name !== "clankerchat") process.exit(1)' "$response"
 
       - name: Upload release archive
@@ -165,21 +195,24 @@ jobs:
             const published = Array.isArray(versions) ? versions : [versions];
             if (published.includes(process.env.EXPECTED_VERSION)) process.exit(1);
           ' "$versions"
-          latest="$(npm view clankerchat dist-tags.latest --json)"
-          node -e '
+          VERSIONS="$versions" node -e '
             const parse = (value) => {
               const match = value.match(/^(\d+)\.(\d+)\.(\d+)$/u);
               if (!match) process.exit(1);
               return match.slice(1).map(Number);
             };
             const current = parse(process.env.EXPECTED_VERSION);
-            const previous = parse(JSON.parse(process.argv[1]));
-            for (let index = 0; index < 3; index += 1) {
-              if (current[index] > previous[index]) process.exit(0);
-              if (current[index] < previous[index]) process.exit(1);
+            const values = JSON.parse(process.env.VERSIONS);
+            const published = Array.isArray(values) ? values : [values];
+            for (const value of published) {
+              const previous = parse(value);
+              let order = 0;
+              for (let index = 0; index < 3 && order === 0; index += 1) {
+                order = current[index] - previous[index];
+              }
+              if (order <= 0) process.exit(1);
             }
-            process.exit(1);
-          ' "$latest"
+          '
 
       - name: Publish package
         run: npm publish "${{ steps.package.outputs.archive }}" --access public --tag latest --registry https://registry.npmjs.org --provenance
