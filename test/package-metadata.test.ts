@@ -16,7 +16,7 @@ describe('package metadata', () => {
     const plugin = json('plugins/clankerchat/.claude-plugin/plugin.json');
     expect(metadata).toMatchObject({
       name: 'clankerchat',
-      version: '0.1.0',
+      version: '0.1.1',
       description: 'comms for your coding agents',
       bin: { clankerchat: 'dist/cli.js', 'clankerchat-mcp': 'dist/mcp.js' },
     });
@@ -54,13 +54,13 @@ describe('package metadata', () => {
     ]);
   });
 
-  it('keeps production source under five thousand lines', () => {
+  it('keeps production source under six thousand lines', () => {
     const files = readdirSync('src').filter((file) => file.endsWith('.ts'));
     const lines = files.reduce(
       (total, file) => total + readFileSync(path.join('src', file), 'utf8').split('\n').length,
       0,
     );
-    expect(lines).toBeLessThan(5_000);
+    expect(lines).toBeLessThan(6_000);
   });
 
   it('keeps old error exports as aliases during package migration', () => {

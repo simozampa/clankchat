@@ -1,18 +1,23 @@
-import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { chmodSync, lstatSync, mkdirSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { resolveRepository } from '../src/git.js';
+import { openDatabase } from '../src/database.js';
+import { doctor } from '../src/doctor.js';
+import { resolveLineContext, resolveRepository } from '../src/git.js';
 import { ChatLine } from '../src/line.js';
-import { linkedWorktree, repository, type TestRepository } from './helpers.js';
+import { directory, linkedWorktree, repository, type TestRepository } from './helpers.js';
 
 const repositories: TestRepository[] = [];
+const originalStateHome = process.env.XDG_STATE_HOME;
 afterEach(() => {
   for (const entry of repositories.splice(0)) entry.cleanup();
+  if (originalStateHome === undefined) delete process.env.XDG_STATE_HOME;
+  else process.env.XDG_STATE_HOME = originalStateHome;
 });
 
 function repo(): TestRepository {
@@ -197,7 +202,7 @@ describe('repository chat line', () => {
     const other = new ChatLine({ cwd: second.root, agent: 'other' });
     expect(alice.repository.databasePath).not.toBe(other.repository.databasePath);
     expect(() => alice.send({ to: 'other', body: 'No route.' })).toThrow(
-      /has not joined this repository line yet; run status, agents, heartbeat, or a message command/u,
+      /has not joined this line yet; run status, agents, heartbeat, or a message command/u,
     );
     alice.close();
     other.close();
@@ -254,5 +259,158 @@ describe('repository chat line', () => {
       ).count,
     ).toBe(8);
     verifier.close();
+  });
+});
+
+describe('global chat line', () => {
+  function globalFixture(): {
+    first: TestRepository;
+    second: TestRepository;
+    state: TestRepository;
+  } {
+    const first = directory();
+    const second = directory();
+    const state = directory('clankerchat-state-');
+    repositories.push(first, second, state);
+    process.env.XDG_STATE_HOME = state.root;
+    return { first, second, state };
+  }
+
+  it('shares one line across non-Git directories', () => {
+    const { first, second, state } = globalFixture();
+    const alice = new ChatLine({ cwd: first.root, agent: 'alice' });
+    const bob = new ChatLine({ cwd: second.root, agent: 'bob' });
+    const sent = alice.send({ to: 'bob', body: 'Global hello.' });
+
+    expect(alice.context.scope).toBe('global');
+    expect(bob.context.databasePath).toBe(alice.context.databasePath);
+    expect(bob.inbox()).toContainEqual(expect.objectContaining({ id: sent.id }));
+    expect(alice.status()).toMatchObject({
+      scope: 'global',
+      repositoryRoot: null,
+      commonGitDirectory: null,
+    });
+    expect(doctor(second.root, { homeDirectory: state.root })).toMatchObject({
+      ok: true,
+      scope: 'global',
+      repositoryRoot: null,
+      databasePath: alice.context.databasePath,
+    });
+    alice.close();
+    bob.close();
+  });
+
+  it('keeps auto repository lines isolated while allowing an explicit global line', () => {
+    const { first } = globalFixture();
+    const created = repo();
+    const outside = new ChatLine({ cwd: first.root, agent: 'outside' });
+    const repositoryLine = new ChatLine({ cwd: created.root, agent: 'inside' });
+    const forced = new ChatLine({ cwd: created.root, scope: 'global', agent: 'forced' });
+    expect(
+      () =>
+        new ChatLine({
+          cwd: created.root,
+          scope: 'global',
+          agent: 'mismatch',
+          expectedDatabasePath: path.join(first.root, 'other.sqlite3'),
+        }),
+    ).toThrow(/binding does not match/u);
+
+    expect(repositoryLine.context.scope).toBe('repository');
+    expect(repositoryLine.context.databasePath).not.toBe(outside.context.databasePath);
+    expect(forced.context.databasePath).toBe(outside.context.databasePath);
+    expect(forced.agents({ includeOffline: true })).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'outside' })]),
+    );
+    outside.close();
+    repositoryLine.close();
+    forced.close();
+  });
+
+  it('keeps strict repository scope and global state permissions', () => {
+    const { first } = globalFixture();
+    expect(() => new ChatLine({ cwd: first.root, scope: 'repository', agent: 'strict' })).toThrow(
+      /requires a Git working tree/u,
+    );
+    const global = new ChatLine({ cwd: first.root, agent: 'global' });
+    const state = lstatSync(global.context.stateDirectory);
+    const database = lstatSync(global.context.databasePath);
+    expect(state.mode & 0o777).toBe(0o700);
+    expect(database.mode & 0o777).toBe(0o600);
+    expect(global.database.prepare('PRAGMA application_id').get()).not.toEqual({
+      application_id: 0x434c_4e4b,
+    });
+    const databasePath = global.context.databasePath;
+    global.close();
+    expect(() => openDatabase(databasePath)).toThrow(/another application/u);
+  });
+
+  it('rejects invalid paths and relative global state roots', () => {
+    const { first } = globalFixture();
+    expect(() => resolveLineContext({ cwd: path.join(first.root, 'missing') })).toThrow(
+      /could not be resolved/u,
+    );
+    process.env.XDG_STATE_HOME = 'relative';
+    expect(() => resolveLineContext({ cwd: first.root, scope: 'global' })).toThrow(
+      /must be an absolute path/u,
+    );
+  });
+
+  it('never falls back on ambiguous Git metadata or Git execution failures', () => {
+    const { first, state } = globalFixture();
+    writeFileSync(path.join(first.root, '.git'), 'gitdir: /missing\n');
+    expect(() => resolveLineContext({ cwd: first.root })).toThrow(/metadata exists/u);
+    expect(
+      resolveLineContext({
+        cwd: state.root,
+        environment: { ...process.env, PATH: '' },
+      }).scope,
+    ).toBe('global');
+    expect(() =>
+      resolveLineContext({
+        cwd: first.root,
+        environment: { ...process.env, PATH: '' },
+      }),
+    ).toThrow(/Could not inspect/u);
+    expect(resolveLineContext({ cwd: first.root, scope: 'global' }).scope).toBe('global');
+  });
+
+  it('rejects bare repositories and unsafe global state directories', () => {
+    const { first, state } = globalFixture();
+    execFileSync('git', ['init', '--bare', '--quiet', first.root]);
+    expect(() => resolveLineContext({ cwd: first.root })).toThrow(/Bare repositories/u);
+    renameSync(path.join(first.root, 'refs'), path.join(first.root, 'refs-real'));
+    symlinkSync('refs-real', path.join(first.root, 'refs'));
+    expect(() =>
+      resolveLineContext({
+        cwd: first.root,
+        environment: { ...process.env, PATH: '' },
+      }),
+    ).toThrow(/Could not inspect/u);
+
+    const unsafe = path.join(state.root, 'clankerchat');
+    mkdirSync(unsafe, { mode: 0o755 });
+    chmodSync(unsafe, 0o755);
+    expect(() => new ChatLine({ cwd: state.root, scope: 'global', agent: 'unsafe' })).toThrow(
+      /permissions are unsafe/u,
+    );
+  });
+
+  it('rejects a writable global state root', () => {
+    const { first, state } = globalFixture();
+    chmodSync(state.root, 0o777);
+    expect(() => new ChatLine({ cwd: first.root, agent: 'unsafe-root' })).toThrow(
+      /state root permissions are unsafe/u,
+    );
+  });
+
+  it('rejects a symlinked global application directory', () => {
+    const { first, state } = globalFixture();
+    const target = directory('clankerchat-state-target-');
+    repositories.push(target);
+    symlinkSync(target.root, path.join(state.root, 'clankerchat'));
+    expect(() => new ChatLine({ cwd: first.root, agent: 'unsafe' })).toThrow(
+      /symlinked state directory/u,
+    );
   });
 });

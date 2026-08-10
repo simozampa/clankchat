@@ -47,8 +47,9 @@ export interface ChatEvent {
 }
 
 export interface LineStatus {
-  repositoryRoot: string;
-  commonGitDirectory: string;
+  scope: 'repository' | 'global';
+  repositoryRoot: string | null;
+  commonGitDirectory: string | null;
   databasePath: string;
   agent: Agent;
   session: Session;
@@ -59,7 +60,8 @@ export interface LineStatus {
 
 export interface DoctorReport {
   ok: boolean;
-  repositoryRoot: string;
+  scope: 'repository' | 'global';
+  repositoryRoot: string | null;
   databasePath: string;
   checks: Array<{ name: string; ok: boolean; detail: string }>;
 }

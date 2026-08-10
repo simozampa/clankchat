@@ -1,4 +1,5 @@
-import { lstatSync, mkdirSync } from 'node:fs';
+import type { Stats } from 'node:fs';
+import { closeSync, lstatSync, mkdirSync, openSync } from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
@@ -15,7 +16,8 @@ const { DatabaseSync: NodeDatabaseSync } = await import('node:sqlite').finally((
 
 const SCHEMA_VERSION = 1;
 const BUSY_TIMEOUT_MS = 15_000;
-const APPLICATION_ID = 0x434c_4e4b;
+const REPOSITORY_APPLICATION_ID = 0x434c_4e4b;
+const GLOBAL_APPLICATION_ID = 0x434c_474c;
 const busyWait = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS agents (
@@ -97,29 +99,87 @@ CREATE TABLE IF NOT EXISTS events (
 ) STRICT;
 `;
 
-function pathState(target: string): ReturnType<typeof lstatSync> | null {
+function pathState(target: string): Stats | null {
   try {
-    return lstatSync(target);
+    return lstatSync(target) as Stats;
   } catch (error) {
     if (error instanceof Error && Reflect.get(error, 'code') === 'ENOENT') return null;
     throw error;
   }
 }
 
-function ensureSafeParent(databasePath: string): void {
+export type DatabaseKind = 'repository' | 'global';
+
+function assertPrivateState(target: string, state: Stats): void {
+  const userId = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (
+    state.isSymbolicLink() ||
+    (userId !== null && state.uid !== userId) ||
+    (!state.isDirectory() && state.nlink !== 1) ||
+    (state.mode & 0o777) !== (state.isDirectory() ? 0o700 : 0o600)
+  ) {
+    throw new ClankerChatError('DATABASE_ERROR', 'Global state permissions are unsafe.', {
+      path: target,
+    });
+  }
+}
+
+function assertSafeGlobalRoot(target: string, state: Stats): void {
+  const userId = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (
+    !state.isDirectory() ||
+    state.isSymbolicLink() ||
+    (userId !== null && state.uid !== userId) ||
+    (state.mode & 0o022) !== 0
+  ) {
+    throw new ClankerChatError('DATABASE_ERROR', 'Global state root permissions are unsafe.', {
+      path: target,
+    });
+  }
+}
+
+function ensureSafeParent(databasePath: string, kind: DatabaseKind): boolean {
   const parent = path.dirname(databasePath);
+  if (kind === 'global') {
+    const root = path.dirname(parent);
+    if (pathState(root)?.isSymbolicLink()) {
+      throw new ClankerChatError('DATABASE_ERROR', 'Refusing to use a symlinked state root.', {
+        path: root,
+      });
+    }
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    assertSafeGlobalRoot(root, lstatSync(root));
+  }
   if (pathState(parent)?.isSymbolicLink()) {
     throw new ClankerChatError('DATABASE_ERROR', 'Refusing to use a symlinked state directory.', {
       path: parent,
     });
   }
   mkdirSync(parent, { recursive: true, mode: 0o700 });
-  const databaseState = pathState(databasePath);
+  const parentState = lstatSync(parent);
+  if (!parentState.isDirectory() || parentState.isSymbolicLink()) {
+    throw new ClankerChatError('DATABASE_ERROR', 'The state path is not a regular directory.', {
+      path: parent,
+    });
+  }
+  if (kind === 'global') assertPrivateState(parent, parentState);
+  let databaseState = pathState(databasePath);
   if (databaseState && (!databaseState.isFile() || databaseState.isSymbolicLink())) {
     throw new ClankerChatError('DATABASE_ERROR', 'Refusing to open a non-regular database.', {
       path: databasePath,
     });
   }
+  let created = false;
+  if (kind === 'global' && !databaseState) {
+    try {
+      closeSync(openSync(databasePath, 'wx', 0o600));
+      created = true;
+    } catch (error) {
+      if (!(error instanceof Error) || Reflect.get(error, 'code') !== 'EEXIST') throw error;
+    }
+    databaseState = lstatSync(databasePath);
+  }
+  if (kind === 'global' && databaseState) assertPrivateState(databasePath, databaseState);
   for (const suffix of ['-journal', '-shm', '-wal']) {
     const sidecar = `${databasePath}${suffix}`;
     const sidecarState = pathState(sidecar);
@@ -132,7 +192,13 @@ function ensureSafeParent(databasePath: string): void {
         },
       );
     }
+    if (kind === 'global' && sidecarState) assertPrivateState(sidecar, sidecarState);
   }
+  return created;
+}
+
+export function assertGlobalStateSafe(databasePath: string): void {
+  ensureSafeParent(databasePath, 'global');
 }
 
 export function assertDatabaseRuntimeCompatible(): void {
@@ -170,7 +236,11 @@ expectedDatabase.exec(SCHEMA);
 const EXPECTED_CATALOG = catalog(expectedDatabase);
 expectedDatabase.close();
 
-function inspectOwnership(database: DatabaseSync): { applicationId: number; version: number } {
+function inspectOwnership(
+  database: DatabaseSync,
+  expectedApplicationId: number,
+  kind: DatabaseKind,
+): { applicationId: number; version: number } {
   const version = pragmaNumber(database, 'user_version');
   const applicationId = pragmaNumber(database, 'application_id');
   if (version !== 0 && version !== SCHEMA_VERSION) {
@@ -179,7 +249,7 @@ function inspectOwnership(database: DatabaseSync): { applicationId: number; vers
       actual: version,
     });
   }
-  if (applicationId !== 0 && applicationId !== APPLICATION_ID) {
+  if (applicationId !== 0 && applicationId !== expectedApplicationId) {
     throw new ClankerChatError('DATABASE_ERROR', 'The state file belongs to another application.');
   }
   const actualCatalog = catalog(database);
@@ -192,7 +262,29 @@ function inspectOwnership(database: DatabaseSync): { applicationId: number; vers
   ) {
     throw new ClankerChatError('DATABASE_ERROR', 'The state file is not a clankerchat database.');
   }
+  if (kind === 'global' && version === SCHEMA_VERSION && applicationId === 0) {
+    throw new ClankerChatError(
+      'DATABASE_ERROR',
+      'The state file is not a global clankerchat line.',
+    );
+  }
   return { applicationId, version };
+}
+
+function inspectOwnershipSnapshot(
+  database: DatabaseSync,
+  applicationId: number,
+  kind: DatabaseKind,
+): { applicationId: number; version: number } {
+  database.exec('BEGIN');
+  try {
+    const ownership = inspectOwnership(database, applicationId, kind);
+    database.exec('COMMIT');
+    return ownership;
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function isBusyError(error: unknown): boolean {
@@ -213,18 +305,23 @@ function withBusyRetry<T>(operation: () => T): T {
   }
 }
 
-export function openDatabase(databasePath: string): DatabaseSync {
-  ensureSafeParent(databasePath);
+export function openDatabase(
+  databasePath: string,
+  options: { kind?: DatabaseKind } = {},
+): DatabaseSync {
+  const kind = options.kind ?? 'repository';
+  const applicationId = kind === 'global' ? GLOBAL_APPLICATION_ID : REPOSITORY_APPLICATION_ID;
+  const created = ensureSafeParent(databasePath, kind);
   let database: DatabaseSync | null = null;
   let phase = 'preflight';
   try {
-    if (pathState(databasePath)) {
+    if (!created && pathState(databasePath)) {
       phase = 'preflight-open';
       const readOnly = withBusyRetry(() => new NodeDatabaseSync(databasePath, { readOnly: true }));
       try {
         readOnly.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
         phase = 'preflight-inspect';
-        withBusyRetry(() => inspectOwnership(readOnly));
+        withBusyRetry(() => inspectOwnershipSnapshot(readOnly, applicationId, kind));
       } finally {
         readOnly.close();
       }
@@ -234,7 +331,7 @@ export function openDatabase(databasePath: string): DatabaseSync {
     database = activeDatabase;
     activeDatabase.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     phase = 'inspect';
-    withBusyRetry(() => inspectOwnership(activeDatabase));
+    withBusyRetry(() => inspectOwnershipSnapshot(activeDatabase, applicationId, kind));
     phase = 'pragmas';
     activeDatabase.exec('PRAGMA foreign_keys = ON');
     phase = 'journal';
@@ -244,20 +341,21 @@ export function openDatabase(databasePath: string): DatabaseSync {
     phase = 'transaction';
     activeDatabase.exec('BEGIN IMMEDIATE');
     try {
-      const ownership = inspectOwnership(activeDatabase);
+      const ownership = inspectOwnership(activeDatabase, applicationId, kind);
       if (ownership.version === 0) {
         activeDatabase.exec(SCHEMA);
         activeDatabase.exec(
-          `PRAGMA application_id = ${APPLICATION_ID}; PRAGMA user_version = ${SCHEMA_VERSION};`,
+          `PRAGMA application_id = ${applicationId}; PRAGMA user_version = ${SCHEMA_VERSION};`,
         );
       } else if (ownership.applicationId === 0) {
-        activeDatabase.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
+        activeDatabase.exec(`PRAGMA application_id = ${applicationId}`);
       }
       activeDatabase.exec('COMMIT');
     } catch (error) {
       activeDatabase.exec('ROLLBACK');
       throw error;
     }
+    if (kind === 'global') ensureSafeParent(databasePath, kind);
     return activeDatabase;
   } catch (error) {
     try {

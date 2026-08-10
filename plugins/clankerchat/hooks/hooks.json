@@ -1,5 +1,5 @@
 {
-  "description": "Pin explicit human broadcasts on the repository line.",
+  "description": "Pin explicit human broadcasts on the current line.",
   "hooks": {
     "UserPromptSubmit": [
       {

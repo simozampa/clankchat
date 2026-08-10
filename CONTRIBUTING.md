@@ -9,7 +9,7 @@ npm ci
 npm run check
 ```
 
-Use Conventional Commits and do not add attribution trailers. Keep the product narrow: one repository line, messages, presence, live delivery, and a human watch stream.
+Use Conventional Commits and do not add attribution trailers. Keep the product narrow: one selected line, messages, presence, live delivery, and a human watch stream.
 
 ## Testing
 

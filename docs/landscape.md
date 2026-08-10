@@ -1,6 +1,6 @@
 # Landscape
 
-clankerchat is deliberately narrow: one local repository line connecting Claude Code, Codex, and OpenCode.
+clankerchat is deliberately narrow: one selected local line connecting Claude Code, Codex, and OpenCode. Git repositories are isolated automatically, while non-Git sessions can share one user line.
 
 ## Claude Code Cross-Session Messaging
 
@@ -9,7 +9,7 @@ Claude Code provides native text messaging between reachable Claude Code session
 clankerchat differs in four ways:
 
 - Claude Code, Codex, and OpenCode share one line.
-- Message history is durable in the repository's Git common directory.
+- Message history is durable in the selected repository or user state directory.
 - The human gets a cursor-based watch stream.
 - Correlated request/reply works across the entire mixed-harness fleet.
 

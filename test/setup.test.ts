@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +16,7 @@ import { pathToFileURL } from 'node:url';
 import { parse } from 'jsonc-parser';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { OPENCODE_CAPTURE_PLUGIN, OPENCODE_TUI_PLUGIN } from '../src/adapters.js';
 import { CODEX_HOOKS, CODEX_PROJECT_BLOCK, LEGACY_CODEX_PROJECT_BLOCK } from '../src/codex.js';
 import { openDatabase } from '../src/database.js';
 import { resolveRepository } from '../src/git.js';
@@ -64,8 +66,8 @@ function commandResult(command: string, args: string[]): SetupCommandResult {
   return { status: 0, stdout: '', stderr: '' };
 }
 
-function mcpDetails(command: string): string {
-  return `Scope: Local config\nType: stdio\nCommand: ${command}\nArgs:\nEnvironment:\n`;
+function mcpDetails(command: string, scope = 'Local config', args = ''): string {
+  return `Scope: ${scope}\nType: stdio\nCommand: ${command}\nArgs: ${args}\nEnvironment:\n`;
 }
 
 function legacyInstructions(): string {
@@ -77,6 +79,239 @@ function legacyOpenCodeInstructions(): string {
 }
 
 describe('setup', () => {
+  it('configures user integrations outside Git', () => {
+    const { home, commands } = fixture();
+    const result = setup({
+      cwd: home,
+      homeDirectory: home,
+      user: true,
+      commandRunner: (command, args) => {
+        commands.push([command, ...args]);
+        return commandResult(command, args);
+      },
+    });
+
+    expect(result).toMatchObject({
+      scope: 'user',
+      repositoryRoot: null,
+      configured: ['claude-code', 'codex', 'opencode'],
+    });
+    expect(result.databasePath).toBe(path.join(home, '.local/state/clankerchat/state.sqlite3'));
+    expect(existsSync(result.databasePath as string)).toBe(true);
+    expect(commands).toContainEqual([
+      'claude',
+      'mcp',
+      'add',
+      '--scope',
+      'user',
+      '--transport',
+      'stdio',
+      'clankerchat',
+      '--',
+      process.execPath,
+      path.join(process.cwd(), 'src', 'mcp.js'),
+    ]);
+    expect(readFileSync(path.join(home, '.claude', 'CLAUDE.md'), 'utf8')).toContain(
+      '<!-- clankerchat:user:start -->',
+    );
+    expect(readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8')).toContain(
+      `command = ${JSON.stringify(process.execPath)}`,
+    );
+    const openCodeConfig = readFileSync(
+      path.join(home, '.config', 'opencode', 'opencode.json'),
+      'utf8',
+    );
+    expect(openCodeConfig).toContain(path.join(home, '.config', 'opencode', 'clankerchat.md'));
+    expect(existsSync(path.join(home, '.config', 'opencode', 'plugins', 'clankerchat.ts'))).toBe(
+      true,
+    );
+  });
+
+  it('preflights modified user instructions before configuring harnesses', () => {
+    const { home, commands } = fixture();
+    mkdirSync(path.join(home, '.claude'), { recursive: true });
+    writeFileSync(
+      path.join(home, '.claude', 'CLAUDE.md'),
+      '<!-- clankerchat:user:start -->\nmodified\n<!-- clankerchat:user:end -->\n',
+    );
+
+    expect(() =>
+      setup({
+        cwd: home,
+        homeDirectory: home,
+        user: true,
+        claude: true,
+        commandRunner: (command, args) => {
+          commands.push([command, ...args]);
+          return commandResult(command, args);
+        },
+      }),
+    ).toThrow(/marked integration block was modified/u);
+    expect(commands).toEqual([]);
+  });
+
+  it('rejects a writable user config root', () => {
+    const { home } = fixture();
+    const config = path.join(home, '.config');
+    mkdirSync(config);
+    chmodSync(config, 0o777);
+
+    expect(() =>
+      setup({
+        cwd: home,
+        homeDirectory: home,
+        user: true,
+        opencode: true,
+        commandRunner: commandResult,
+      }),
+    ).toThrow(/config root permissions are unsafe/u);
+  });
+
+  it('rejects writable harness-specific user directories', () => {
+    const claude = fixture();
+    mkdirSync(path.join(claude.home, '.claude'));
+    chmodSync(path.join(claude.home, '.claude'), 0o777);
+    expect(() =>
+      setup({
+        cwd: claude.home,
+        homeDirectory: claude.home,
+        user: true,
+        claude: true,
+        commandRunner: commandResult,
+      }),
+    ).toThrow(/Claude home permissions are unsafe/u);
+
+    const openCode = fixture();
+    mkdirSync(path.join(openCode.home, '.config', 'opencode'), { recursive: true });
+    chmodSync(path.join(openCode.home, '.config', 'opencode'), 0o777);
+    expect(() =>
+      setup({
+        cwd: openCode.home,
+        homeDirectory: openCode.home,
+        user: true,
+        opencode: true,
+        commandRunner: commandResult,
+      }),
+    ).toThrow(/OpenCode config directory permissions are unsafe/u);
+  });
+
+  it('recognizes an existing Claude user MCP registration', () => {
+    const { home, commands } = fixture();
+    setup({
+      cwd: home,
+      homeDirectory: home,
+      user: true,
+      claude: true,
+      commandRunner: (command, args) => {
+        commands.push([command, ...args]);
+        if (args.join(' ') === 'mcp get clankerchat') {
+          return {
+            status: 0,
+            stdout: mcpDetails(
+              process.execPath,
+              'User config (available in all your projects)',
+              path.join(process.cwd(), 'src', 'mcp.js'),
+            ),
+            stderr: '',
+          };
+        }
+        if (args.join(' ') === 'plugin marketplace list --json') {
+          return {
+            status: 0,
+            stdout: JSON.stringify([
+              { name: 'clankerchat', source: 'github', repo: 'simozampa/clankerchat' },
+            ]),
+            stderr: '',
+          };
+        }
+        if (args.join(' ') === 'plugin list --json') {
+          return {
+            status: 0,
+            stdout: JSON.stringify([
+              { id: 'clankerchat@clankerchat', scope: 'user', version: '0.1.1' },
+            ]),
+            stderr: '',
+          };
+        }
+        return commandResult(command, args);
+      },
+    });
+
+    expect(commands.some((entry) => entry[1] === 'mcp' && entry[2] === 'add')).toBe(false);
+  });
+
+  it('migrates an exact bare Claude user MCP registration', () => {
+    const { home, commands } = fixture();
+    let registration: 'bare' | 'pinned' | 'missing' = 'bare';
+    setup({
+      cwd: home,
+      homeDirectory: home,
+      user: true,
+      claude: true,
+      commandRunner: (command, args) => {
+        commands.push([command, ...args]);
+        if (args.join(' ') === 'mcp get clankerchat') {
+          if (registration === 'missing') return commandResult(command, args);
+          return {
+            status: 0,
+            stdout:
+              registration === 'bare'
+                ? mcpDetails('clankerchat-mcp', 'User config (available in all your projects)')
+                : mcpDetails(
+                    process.execPath,
+                    'User config (available in all your projects)',
+                    path.join(process.cwd(), 'src', 'mcp.js'),
+                  ),
+            stderr: '',
+          };
+        }
+        if (args.join(' ') === 'mcp remove --scope user clankerchat') {
+          registration = 'missing';
+          return { status: 0, stdout: '', stderr: '' };
+        }
+        if (args[0] === 'mcp' && args[1] === 'add') {
+          registration = 'pinned';
+          return { status: 0, stdout: '', stderr: '' };
+        }
+        if (args.join(' ') === 'plugin marketplace list --json') {
+          return {
+            status: 0,
+            stdout: JSON.stringify([
+              { name: 'clankerchat', source: 'github', repo: 'simozampa/clankerchat' },
+            ]),
+            stderr: '',
+          };
+        }
+        if (args.join(' ') === 'plugin list --json') {
+          return {
+            status: 0,
+            stdout: JSON.stringify([
+              { id: 'clankerchat@clankerchat', scope: 'user', version: '0.1.1' },
+            ]),
+            stderr: '',
+          };
+        }
+        return commandResult(command, args);
+      },
+    });
+
+    expect(registration).toBe('pinned');
+    expect(commands).toContainEqual(['claude', 'mcp', 'remove', '--scope', 'user', 'clankerchat']);
+    expect(commands).toContainEqual([
+      'claude',
+      'mcp',
+      'add',
+      '--scope',
+      'user',
+      '--transport',
+      'stdio',
+      'clankerchat',
+      '--',
+      process.execPath,
+      path.join(process.cwd(), 'src', 'mcp.js'),
+    ]);
+  });
+
   it('configures all harnesses and removes stale integration data surgically', () => {
     const { root, home, commands } = fixture();
     mkdirSync(path.join(root, '.opencode', 'plugins'), { recursive: true });
@@ -187,6 +422,114 @@ describe('setup', () => {
     expect(second.removedStaleConfiguration).toBe(false);
     expect(files.map((file) => readFileSync(path.join(root, file), 'utf8'))).toEqual(before);
     expect(readFileSync(path.join(home, '.codex', 'hooks.json'), 'utf8')).toBe(hooksBefore);
+  });
+
+  it('upgrades exact 0.1.0 OpenCode adapters', () => {
+    const { root, home } = fixture();
+    const shippedExecutable =
+      'const executable = process.env.CLANKERCHAT_BIN || process.env.CLANKCHAT_BIN || "clankerchat"';
+    const withoutHarnessBinding = (source: string): string => {
+      const start = source.indexOf('async function harnessBinding() {');
+      const end = source.indexOf('\n}\n', start);
+      return `${source.slice(0, start)}${source.slice(end + 4)}`.replace(
+        'import { lstatSync } from "node:fs"\n\n',
+        '',
+      );
+    };
+    const shippedTui = withoutHarnessBinding(OPENCODE_TUI_PLUGIN)
+      .replace('    const binding = await harnessBinding()\n    if (!binding) return\n', '')
+      .replace(
+        '    const singleton = Symbol.for("clankerchat.tui.active")\n    if (Reflect.get(globalThis, singleton)) return\n    Reflect.set(globalThis, singleton, true)\n',
+        '',
+      )
+      .replace('    const selectedScope = binding.scope\n', '')
+      .replace(
+        '    const bindingController = new AbortController()\n    const signal = AbortSignal.any([api.lifecycle.signal, bindingController.signal])',
+        '    const signal = api.lifecycle.signal',
+      )
+      .replace(
+        '    let child\n    let bindingTimer\n    let bindingActive = true\n',
+        '    let child\n',
+      )
+      .replace(
+        '    api.lifecycle.onDispose(() => {\n      child?.kill()\n      bindingController.abort()\n      clearInterval(bindingTimer)\n      Reflect.deleteProperty(globalThis, singleton)\n    })',
+        '    api.lifecycle.onDispose(() => child?.kill())',
+      )
+      .replace(
+        '    if (binding.token) {\n      bindingTimer = setInterval(async () => {\n        const current = await harnessBinding()\n        if (!current || current.token !== binding.token ||\n            current.databasePath !== binding.databasePath) {\n          bindingActive = false\n          bindingController.abort()\n          clearInterval(bindingTimer)\n          child?.kill()\n        }\n      }, 5000)\n    }\n',
+        '',
+      )
+      .replace(
+        '    async function bindingIsCurrent() {\n      if (!binding.token) return true\n      const current = await harnessBinding()\n      return current?.token === binding.token && current.databasePath === binding.databasePath\n    }\n\n',
+        '',
+      )
+      .replace(
+        '      if (!(await bindingIsCurrent())) {\n        bindingController.abort()\n        throw new Error("The clankerchat line binding changed")\n      }\n',
+        '',
+      )
+      .replace(
+        '              if (!(await bindingIsCurrent())) {\n                bindingController.abort()\n                throw new Error("The clankerchat line binding changed")\n              }\n',
+        '',
+      )
+      .replace(
+        '      while (!signal.aborted && bindingActive) {',
+        '      while (!signal.aborted) {',
+      )
+      .replace(
+        '        if (!signal.aborted && bindingActive) await delay(1000, signal)',
+        '        if (!signal.aborted) await delay(1000, signal)',
+      )
+      .replace(
+        '            executable, "--cwd", directory, "--scope", selectedScope,\n            "--agent", identity, "--harness", "opencode",',
+        '            executable, "--cwd", directory, "--agent", identity, "--harness", "opencode",',
+      )
+      .replace(
+        '            env: {\n              ...process.env,\n              CLANKERCHAT_SESSION: deliverySession,\n              ...(binding.databasePath\n                ? {\n                    CLANKERCHAT_EXPECTED_DATABASE_PATH_BASE64: binding.databasePath,\n                    CLANKERCHAT_BINDING_FILE: binding.bindingFile,\n                    CLANKERCHAT_BINDING_TOKEN: binding.token,\n                  }\n                : {}),\n            },',
+        '            env: { ...process.env, CLANKERCHAT_SESSION: deliverySession },',
+      )
+      .replace('const executable = "clankerchat"', shippedExecutable);
+    const captureLines = withoutHarnessBinding(OPENCODE_CAPTURE_PLUGIN)
+      .replace('        const binding = await harnessBinding()\n        if (!binding) return\n', '')
+      .replace(
+        '          executable, "--cwd", directory, "--scope", binding.scope,\n          "--agent", identity(), "--harness", "opencode",',
+        '          executable, "--cwd", directory, "--agent", identity(), "--harness", "opencode",',
+      )
+      .replace(
+        '        ], {\n          cwd: directory,\n          env: {\n            ...process.env,\n            ...(binding.databasePath\n              ? {\n                  CLANKERCHAT_EXPECTED_DATABASE_PATH_BASE64: binding.databasePath,\n                  CLANKERCHAT_BINDING_FILE: binding.bindingFile,\n                  CLANKERCHAT_BINDING_TOKEN: binding.token,\n                }\n              : {}),\n          },\n          stdin: "pipe", stdout: "ignore", stderr: "ignore",\n        })',
+        '        ], { cwd: directory, env: process.env, stdin: "pipe", stdout: "ignore", stderr: "ignore" })',
+      )
+      .split('\n');
+    const captureExport = captureLines.indexOf(
+      'export const ClankerchatCapture = async ({ client, directory }) => {',
+    );
+    const captureStart = captureLines.indexOf('    "chat.message": async (input, output) => {');
+    const captureEnd = captureLines.lastIndexOf('    },');
+    const shippedCapture = [
+      ...captureLines.slice(0, captureExport),
+      'export const ClankerchatCapture = async ({ client, directory }) => ({',
+      ...captureLines.slice(captureStart, captureEnd + 1).map((line) => line.slice(2)),
+      '})',
+      '',
+    ]
+      .join('\n')
+      .replace('const executable = "clankerchat"', shippedExecutable);
+    mkdirSync(path.join(root, '.opencode', 'plugins'), { recursive: true });
+    writeFileSync(path.join(root, '.opencode', 'clankerchat-tui.ts'), shippedTui);
+    writeFileSync(path.join(root, '.opencode', 'plugins', 'clankerchat.ts'), shippedCapture);
+
+    setup({
+      cwd: root,
+      homeDirectory: home,
+      opencode: true,
+      commandRunner: commandResult,
+    });
+
+    expect(readFileSync(path.join(root, '.opencode', 'clankerchat-tui.ts'), 'utf8')).toBe(
+      OPENCODE_TUI_PLUGIN,
+    );
+    expect(readFileSync(path.join(root, '.opencode', 'plugins', 'clankerchat.ts'), 'utf8')).toBe(
+      OPENCODE_CAPTURE_PLUGIN,
+    );
   });
 
   it('replaces exact legacy clankchat integrations without losing unrelated settings', () => {
@@ -841,6 +1184,57 @@ describe('setup', () => {
       }),
     ).toThrow(/rejected/u);
     expect(existsSync(path.join(root, 'CLAUDE.local.md'))).toBe(false);
+  });
+
+  it('strips inherited Git routing from Claude plugin preflights', () => {
+    const first = repository();
+    const second = repository();
+    repositories.push(first, second);
+    const home = mkdtempSync(path.join(tmpdir(), 'clankerchat-plugin-home-'));
+    homes.push(home);
+    setup({ cwd: second.root, homeDirectory: home, opencode: true });
+    const bin = path.join(home, 'bin');
+    const called = path.join(home, 'called');
+    const state = path.join(home, 'state');
+    const bindings = path.join(state, 'clankerchat', 'harness-bindings');
+    mkdirSync(bin);
+    mkdirSync(bindings, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(bin, 'clankerchat'), '#!/bin/sh\n: > "$CALLED_FILE"\n');
+    chmodSync(path.join(bin, 'clankerchat'), 0o700);
+    const databasePath = resolveRepository(first.root).databasePath;
+    const binding = path.join(bindings, 'claude-code-git-routing.binding');
+    writeFileSync(
+      binding,
+      `1\trepository\t${process.pid}\t${Date.now() + 90_000}\t00000000-0000-0000-0000-000000000000\n${Buffer.from(databasePath).toString('base64')}\n`,
+      { mode: 0o600 },
+    );
+    const environment = {
+      ...process.env,
+      HOME: home,
+      XDG_STATE_HOME: state,
+      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
+      CALLED_FILE: called,
+      CLAUDE_PROJECT_DIR: first.root,
+      CLAUDE_CODE_SESSION_ID: 'git-routing',
+      GIT_DIR: resolveRepository(second.root).commonGitDirectory,
+      GIT_WORK_TREE: second.root,
+    };
+
+    const monitor = spawnSync('sh', ['plugins/clankerchat/bin/inbox-monitor.sh'], {
+      cwd: process.cwd(),
+      env: environment,
+      encoding: 'utf8',
+    });
+    const capture = spawnSync(process.execPath, ['plugins/clankerchat/hooks/capture-pinned.mjs'], {
+      cwd: process.cwd(),
+      env: environment,
+      input: 'For all agents: stay scoped.\n',
+      encoding: 'utf8',
+    });
+
+    expect(monitor.status).toBe(0);
+    expect(capture.status).toBe(0);
+    expect(existsSync(called)).toBe(false);
   });
 
   it('preflights all OpenCode files before writing', () => {

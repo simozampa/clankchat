@@ -1,22 +1,32 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { handleCodexHook, LEGACY_CODEX_PROJECT_BLOCK } from '../src/codex.js';
+import { CODEX_PROJECT_BLOCK, handleCodexHook, LEGACY_CODEX_PROJECT_BLOCK } from '../src/codex.js';
 import { doctor } from '../src/doctor.js';
 import { resolveRepository } from '../src/git.js';
 import { ChatLine } from '../src/line.js';
 import { setup } from '../src/setup.js';
-import { repository, type TestRepository } from './helpers.js';
+import { directory, repository, type TestRepository } from './helpers.js';
 
 const repositories: TestRepository[] = [];
 const homes: string[] = [];
 const lines: ChatLine[] = [];
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const line of lines.splice(0)) line.close();
   for (const entry of repositories.splice(0)) entry.cleanup();
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
@@ -27,6 +37,7 @@ function fixture(): { root: string; home: string } {
   repositories.push(created);
   const home = mkdtempSync(path.join(tmpdir(), 'clankerchat-codex-home-'));
   homes.push(home);
+  vi.stubEnv('CODEX_HOME', path.join(home, '.codex'));
   setup({
     cwd: created.root,
     homeDirectory: home,
@@ -72,6 +83,165 @@ async function outputFor(
 }
 
 describe('Codex hooks', () => {
+  it('uses user configuration on the shared line outside Git', async () => {
+    const first = directory();
+    const second = directory();
+    repositories.push(first, second);
+    const home = mkdtempSync(path.join(tmpdir(), 'clankerchat-codex-user-'));
+    homes.push(home);
+    vi.stubEnv('CODEX_HOME', path.join(home, '.codex'));
+    vi.stubEnv('XDG_STATE_HOME', path.join(home, '.local', 'state'));
+    setup({
+      cwd: first.root,
+      homeDirectory: home,
+      user: true,
+      codex: true,
+      commandRunner: (_command, args) => ({
+        status: 0,
+        stdout: args[0] === '--version' ? 'codex-cli 0.147.0\n' : 'hooks stable true\n',
+        stderr: '',
+      }),
+    });
+
+    const started = await outputFor(first.root, 'SessionStart');
+    expect(JSON.parse(started[0] ?? '{}')).toMatchObject({
+      hookSpecificOutput: { additionalContext: expect.stringContaining('current line') },
+    });
+    const sender = new ChatLine({ cwd: second.root, agent: 'sender' });
+    lines.push(sender);
+    sender.send({ to: 'codex-session-one', body: 'Shared globally.' });
+    const delivered = await outputFor(first.root, 'UserPromptSubmit', { prompt: 'Continue.' });
+    expect(JSON.parse(delivered[0] ?? '{}')).toMatchObject({
+      hookSpecificOutput: { additionalContext: expect.stringContaining('Shared globally.') },
+    });
+    expect(
+      doctor(first.root, {
+        homeDirectory: home,
+        codexFeaturesRunner: () => ({ status: 0, stdout: 'hooks stable true\n', stderr: '' }),
+        codexVersionRunner: () => ({ status: 0, stdout: 'codex-cli 0.147.0\n', stderr: '' }),
+      }).checks,
+    ).toContainEqual(expect.objectContaining({ name: 'codex-mcp', ok: true }));
+  });
+
+  it('keeps a Codex session on its startup line after Git initialization', async () => {
+    const outside = directory();
+    repositories.push(outside);
+    const home = mkdtempSync(path.join(tmpdir(), 'clankerchat-codex-user-'));
+    homes.push(home);
+    vi.stubEnv('CODEX_HOME', path.join(home, '.codex'));
+    setup({
+      cwd: outside.root,
+      homeDirectory: home,
+      user: true,
+      codex: true,
+      commandRunner: (_command, args) => ({
+        status: 0,
+        stdout: args[0] === '--version' ? 'codex-cli 0.147.0\n' : 'hooks stable true\n',
+        stderr: '',
+      }),
+    });
+    await outputFor(outside.root, 'SessionStart');
+    const sender = new ChatLine({
+      cwd: outside.root,
+      scope: 'global',
+      agent: 'global-sender',
+    });
+    lines.push(sender);
+    sender.send({ to: 'codex-session-one', body: 'Remain on the user line.' });
+    execFileSync('git', ['init', '--quiet', outside.root]);
+
+    const delivered = await outputFor(outside.root, 'UserPromptSubmit', { prompt: 'Continue.' });
+    expect(JSON.parse(delivered[0] ?? '{}')).toMatchObject({
+      hookSpecificOutput: {
+        additionalContext: expect.stringContaining('Remain on the user line.'),
+      },
+    });
+    expect(existsSync(resolveRepository(outside.root).databasePath)).toBe(false);
+  });
+
+  it('does not run user hooks through an overridden project MCP registration', async () => {
+    const created = repository();
+    repositories.push(created);
+    const home = mkdtempSync(path.join(tmpdir(), 'clankerchat-codex-user-'));
+    homes.push(home);
+    vi.stubEnv('CODEX_HOME', path.join(home, '.codex'));
+    vi.stubEnv('XDG_STATE_HOME', path.join(home, '.local', 'state'));
+    setup({
+      cwd: created.root,
+      homeDirectory: home,
+      user: true,
+      codex: true,
+      commandRunner: (_command, args) => ({
+        status: 0,
+        stdout: args[0] === '--version' ? 'codex-cli 0.147.0\n' : 'hooks stable true\n',
+        stderr: '',
+      }),
+    });
+    mkdirSync(path.join(created.root, '.codex'), { recursive: true });
+    writeFileSync(
+      path.join(created.root, '.codex', 'config.toml'),
+      '[mcp_servers.clankerchat]\ncommand = "unrelated-server"\n',
+    );
+
+    await expect(outputFor(created.root, 'SessionStart')).resolves.toEqual([]);
+    const globalOutput: string[] = [];
+    await handleCodexHook(
+      'SessionStart',
+      payload(created.root, 'SessionStart', { session_id: 'global-override' }),
+      {
+        scope: 'global',
+        write: (value) => {
+          globalOutput.push(value);
+        },
+      },
+    );
+    expect(globalOutput).toEqual([]);
+  });
+
+  it('honors the closest nested Codex MCP registration', async () => {
+    const created = repository();
+    repositories.push(created);
+    const nested = path.join(created.root, 'packages', 'api');
+    const home = mkdtempSync(path.join(tmpdir(), 'clankerchat-codex-user-'));
+    homes.push(home);
+    vi.stubEnv('CODEX_HOME', path.join(home, '.codex'));
+    vi.stubEnv('XDG_STATE_HOME', path.join(home, '.local', 'state'));
+    setup({
+      cwd: created.root,
+      homeDirectory: home,
+      user: true,
+      codex: true,
+      commandRunner: (_command, args) => ({
+        status: 0,
+        stdout: args[0] === '--version' ? 'codex-cli 0.147.0\n' : 'hooks stable true\n',
+        stderr: '',
+      }),
+    });
+    mkdirSync(path.join(nested, '.codex'), { recursive: true });
+    writeFileSync(
+      path.join(nested, '.codex', 'config.toml'),
+      '[mcp_servers.clankerchat]\ncommand = "unrelated-server"\n',
+    );
+
+    await expect(outputFor(nested, 'SessionStart')).resolves.toEqual([]);
+    writeFileSync(path.join(nested, '.codex', 'config.toml'), `${CODEX_PROJECT_BLOCK}\n`);
+    expect(await outputFor(nested, 'SessionStart')).not.toEqual([]);
+    mkdirSync(path.join(created.root, '.codex'), { recursive: true });
+    writeFileSync(
+      path.join(created.root, '.codex', 'config.toml'),
+      '[mcp_servers.clankerchat]\ncommand = "unrelated-server"\n',
+    );
+    writeFileSync(path.join(nested, '.codex', 'config.toml'), `${LEGACY_CODEX_PROJECT_BLOCK}\n`);
+    await expect(outputFor(nested, 'SessionStart')).resolves.toEqual([]);
+    expect(
+      doctor(nested, {
+        homeDirectory: home,
+        codexFeaturesRunner: () => ({ status: 0, stdout: 'hooks stable true\n', stderr: '' }),
+        codexVersionRunner: () => ({ status: 0, stdout: 'codex-cli 0.147.0\n', stderr: '' }),
+      }).checks,
+    ).toContainEqual(expect.objectContaining({ name: 'codex-mcp', ok: false }));
+  });
+
   it('injects instructions and completes one peer delivery at a turn boundary', async () => {
     const { root } = fixture();
     const started = await outputFor(root, 'SessionStart');

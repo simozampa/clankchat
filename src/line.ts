@@ -3,7 +3,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { type ChatDatabase, immediateTransaction, openDatabase } from './database.js';
 import { ClankerChatError } from './errors.js';
-import { type RepositoryContext, resolveRepository } from './git.js';
+import {
+  type LineContext,
+  type LineScope,
+  type RepositoryContext,
+  resolveLineContext,
+} from './git.js';
 import type { Agent, ChatEvent, Harness, LineStatus, Message, Session } from './types.js';
 
 const DEFAULT_SESSION_TTL_SECONDS = 90;
@@ -153,17 +158,19 @@ function toEvent(row: EventRow): ChatEvent {
 
 export interface LineOptions {
   cwd?: string;
+  scope?: LineScope;
   agent: string;
   harness?: Harness;
   processId?: number | null;
   sessionId?: string;
   sessionTtlSeconds?: number;
   announcePresence?: boolean;
+  expectedDatabasePath?: string;
   now?: () => number;
 }
 
 export class ChatLine {
-  readonly repository: RepositoryContext;
+  readonly context: LineContext;
   readonly database: ChatDatabase;
   readonly agentName: string;
   readonly harness: Harness;
@@ -175,9 +182,23 @@ export class ChatLine {
   #closed = false;
   #reservations = new Map<string, string>();
 
-  constructor(options: LineOptions) {
-    this.repository = resolveRepository(options.cwd);
-    this.database = openDatabase(this.repository.databasePath);
+  constructor(options: LineOptions, resolvedContext?: LineContext) {
+    this.context =
+      resolvedContext ??
+      resolveLineContext({
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        ...(options.scope === undefined ? {} : { scope: options.scope }),
+      });
+    if (
+      options.expectedDatabasePath !== undefined &&
+      this.context.databasePath !== options.expectedDatabasePath
+    ) {
+      throw new ClankerChatError(
+        'INVALID_INPUT',
+        'The harness binding does not match the selected clankerchat line.',
+      );
+    }
+    this.database = openDatabase(this.context.databasePath, { kind: this.context.scope });
     this.agentName = validateAgentName(options.agent);
     this.harness = options.harness ?? 'other';
     this.sessionTtlSeconds = options.sessionTtlSeconds ?? DEFAULT_SESSION_TTL_SECONDS;
@@ -189,6 +210,13 @@ export class ChatLine {
 
   get sessionId(): string {
     return this.#sessionId;
+  }
+
+  get repository(): RepositoryContext {
+    if (this.context.scope === 'global') {
+      throw new ClankerChatError('INVALID_INPUT', 'The global line has no Git repository.');
+    }
+    return this.context;
   }
 
   #recordEvent(
@@ -224,7 +252,7 @@ export class ChatLine {
         count: number;
       };
       if (!preferredId && sessionUsage.count >= MAX_SESSIONS) {
-        throw new ClankerChatError('DATABASE_ERROR', 'The repository session quota is exhausted.');
+        throw new ClankerChatError('DATABASE_ERROR', 'The line session quota is exhausted.');
       }
       const existing = this.database
         .prepare('SELECT name FROM agents WHERE name = ?')
@@ -389,7 +417,7 @@ export class ChatLine {
     if (!found) {
       throw new ClankerChatError(
         'AGENT_NOT_FOUND',
-        `Agent ${name} has not joined this repository line yet; run status, agents, heartbeat, or a message command as ${name} first.`,
+        `Agent ${name} has not joined this line yet; run status, agents, heartbeat, or a message command as ${name} first.`,
       );
     }
   }
@@ -454,7 +482,7 @@ export class ChatLine {
         usage.bytes + Buffer.byteLength(body) > MAX_MESSAGE_BYTES ||
         (input.pinned && usage.pins >= MAX_PINS)
       ) {
-        throw new ClankerChatError('DATABASE_ERROR', 'The repository message quota is exhausted.');
+        throw new ClankerChatError('DATABASE_ERROR', 'The line message quota is exhausted.');
       }
 
       this.database
@@ -867,9 +895,11 @@ export class ChatLine {
       )
       .get(this.agentName, this.#sessionId) as { count: number };
     return {
-      repositoryRoot: this.repository.root,
-      commonGitDirectory: this.repository.commonGitDirectory,
-      databasePath: this.repository.databasePath,
+      scope: this.context.scope,
+      repositoryRoot: this.context.scope === 'repository' ? this.context.root : null,
+      commonGitDirectory:
+        this.context.scope === 'repository' ? this.context.commonGitDirectory : null,
+      databasePath: this.context.databasePath,
       agent: self,
       session: current,
       agents: allAgents,
@@ -881,12 +911,26 @@ export class ChatLine {
 
 /** A read-only event cursor for humans that never joins the agent line. */
 export class ChatObserver {
-  readonly repository: RepositoryContext;
+  readonly context: LineContext;
   readonly database: ChatDatabase;
 
-  constructor(cwd = process.cwd()) {
-    this.repository = resolveRepository(cwd);
-    this.database = openDatabase(this.repository.databasePath);
+  constructor(options: string | { cwd?: string; scope?: LineScope } = process.cwd()) {
+    this.context = resolveLineContext(
+      typeof options === 'string'
+        ? { cwd: options }
+        : {
+            ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+            ...(options.scope === undefined ? {} : { scope: options.scope }),
+          },
+    );
+    this.database = openDatabase(this.context.databasePath, { kind: this.context.scope });
+  }
+
+  get repository(): RepositoryContext {
+    if (this.context.scope === 'global') {
+      throw new ClankerChatError('INVALID_INPUT', 'The global line has no Git repository.');
+    }
+    return this.context;
   }
 
   heartbeat(): void {}

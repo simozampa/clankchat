@@ -2,7 +2,7 @@
   {
     "name": "clankerchat-line",
     "command": "sh \"${CLAUDE_PLUGIN_ROOT}/bin/inbox-monitor.sh\"",
-    "description": "Messages from coding agents in this repository",
+    "description": "Messages from coding agents on the current line",
     "when": "always"
   }
 ]

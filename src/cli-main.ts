@@ -1,4 +1,5 @@
-import { readSync } from 'node:fs';
+import { lstatSync, readFileSync, readSync, realpathSync } from 'node:fs';
+import path from 'node:path';
 import { createInterface } from 'node:readline';
 
 import { Command } from 'commander';
@@ -6,6 +7,7 @@ import { Command } from 'commander';
 import { agentIdentity, detectHarness } from './activity.js';
 import { handleCodexHook, isCodexHookEvent } from './codex.js';
 import { doctor } from './doctor.js';
+import { globalStateDirectory, type LineScope, parseLineScope } from './git.js';
 import { ChatLine, ChatObserver } from './line.js';
 import { setup } from './setup.js';
 import type { Harness, Message } from './types.js';
@@ -14,6 +16,7 @@ import { followMessages, watchEvents } from './watch.js';
 
 interface GlobalOptions {
   cwd: string;
+  scope: LineScope;
   agent?: string;
   harness?: Harness;
 }
@@ -45,7 +48,50 @@ function body(options: { body?: string; bodyStdin?: boolean }): string {
 }
 
 function globalOptions(command: Command): GlobalOptions {
-  return command.optsWithGlobals<GlobalOptions>();
+  const options = command.optsWithGlobals<Omit<GlobalOptions, 'scope'> & { scope?: string }>();
+  return {
+    ...options,
+    scope: parseLineScope(
+      options.scope ?? process.env.CLANKERCHAT_SCOPE ?? process.env.CLANKCHAT_SCOPE,
+    ),
+  };
+}
+
+function harnessBindingAssertion(): (() => void) | undefined {
+  const target = process.env.CLANKERCHAT_BINDING_FILE;
+  const token = process.env.CLANKERCHAT_BINDING_TOKEN;
+  if (!target && !token) return undefined;
+  if (!target || !token || !path.isAbsolute(target))
+    throw new Error('The harness binding is invalid.');
+  const expectedDirectory = path.join(globalStateDirectory(), 'harness-bindings');
+  return () => {
+    const state = lstatSync(target);
+    const userId = typeof process.getuid === 'function' ? process.getuid() : null;
+    const lines = readFileSync(target, 'utf8').split('\n');
+    const fields = lines[0]?.split('\t') ?? [];
+    const owner = Number(fields[2]);
+    const expires = Number(fields[3]);
+    if (
+      realpathSync(path.dirname(target)) !== expectedDirectory ||
+      !state.isFile() ||
+      state.isSymbolicLink() ||
+      state.nlink !== 1 ||
+      (userId !== null && state.uid !== userId) ||
+      (state.mode & 0o777) !== 0o600 ||
+      lines.length !== 3 ||
+      fields.length !== 5 ||
+      fields[0] !== '1' ||
+      fields[4] !== token ||
+      !Number.isSafeInteger(owner) ||
+      owner <= 0 ||
+      !Number.isSafeInteger(expires) ||
+      expires <= Date.now() ||
+      lines[1] !== process.env.CLANKERCHAT_EXPECTED_DATABASE_PATH_BASE64
+    ) {
+      throw new Error('The harness binding is no longer active.');
+    }
+    process.kill(owner, 0);
+  };
 }
 
 function openLine(command: Command): ChatLine {
@@ -53,11 +99,24 @@ function openLine(command: Command): ChatLine {
   const harness = options.harness ?? detectHarness();
   const announcePresence = command.name() === 'follow' && command.parent?.name() === 'message';
   const sessionId = process.env.CLANKERCHAT_SESSION ?? process.env.CLANKCHAT_SESSION;
+  const encodedPath = process.env.CLANKERCHAT_EXPECTED_DATABASE_PATH_BASE64;
+  const expectedDatabasePath = encodedPath
+    ? Buffer.from(encodedPath, 'base64').toString('utf8')
+    : undefined;
+  if (
+    encodedPath &&
+    (!expectedDatabasePath || Buffer.from(expectedDatabasePath).toString('base64') !== encodedPath)
+  ) {
+    throw new Error('The harness database binding is invalid.');
+  }
+  harnessBindingAssertion()?.();
   return new ChatLine({
     cwd: options.cwd,
+    scope: options.scope,
     agent: options.agent ?? agentIdentity(harness),
     harness,
     announcePresence,
+    ...(expectedDatabasePath ? { expectedDatabasePath } : {}),
     ...(sessionId ? { sessionId } : {}),
   });
 }
@@ -90,9 +149,10 @@ export function buildProgram(signal?: AbortSignal): Command {
     .version(VERSION)
     .option(
       '--cwd <path>',
-      'repository path',
+      'context path',
       process.env.CLANKERCHAT_CWD ?? process.env.CLANKCHAT_CWD ?? process.cwd(),
     )
+    .option('--scope <scope>', 'auto, repository, or global')
     .option(
       '--agent <name>',
       'agent name',
@@ -102,16 +162,21 @@ export function buildProgram(signal?: AbortSignal): Command {
 
   program
     .command('setup')
-    .description('Configure Claude Code, Codex, and OpenCode for this repository.')
+    .description('Configure Claude Code, Codex, and OpenCode.')
+    .option('--user', 'configure user-level integrations')
     .option('--claude', 'configure only Claude Code')
     .option('--codex', 'configure only Codex')
     .option('--opencode', 'configure only OpenCode')
     .action(
-      (options: { claude?: boolean; codex?: boolean; opencode?: boolean }, command: Command) => {
+      (
+        options: { user?: boolean; claude?: boolean; codex?: boolean; opencode?: boolean },
+        command: Command,
+      ) => {
         const globals = globalOptions(command);
         print(
           setup({
             cwd: globals.cwd,
+            ...(options.user ? { user: true } : {}),
             ...(options.claude ? { claude: true } : {}),
             ...(options.codex ? { codex: true } : {}),
             ...(options.opencode ? { opencode: true } : {}),
@@ -122,14 +187,14 @@ export function buildProgram(signal?: AbortSignal): Command {
 
   program
     .command('status')
-    .description('Show this repository line and the current agent.')
+    .description('Show the selected line and the current agent.')
     .action((_options: unknown, command: Command) =>
       print(withLine(command, (line) => line.status())),
     );
 
   program
     .command('agents')
-    .description('List agents on this repository line.')
+    .description('List agents on the selected line.')
     .option('--all', 'include offline agents')
     .action((options: { all?: boolean }, command: Command) =>
       print(
@@ -148,16 +213,17 @@ export function buildProgram(signal?: AbortSignal): Command {
 
   program
     .command('doctor')
-    .description('Check Git, SQLite, and Codex setup.')
+    .description('Check line state and Codex setup.')
     .action((_options: unknown, command: Command) => {
-      const report = doctor(globalOptions(command).cwd);
+      const globals = globalOptions(command);
+      const report = doctor(globals.cwd, { scope: globals.scope });
       print(report);
       if (!report.ok) process.exitCode = 1;
     });
 
   program
     .command('watch')
-    .description('Watch the repository conversation.')
+    .description('Watch the selected line.')
     .option('--after <sequence>', 'start after event sequence', (value) => Number(value), 0)
     .option('--interval <milliseconds>', 'poll interval', (value) => Number(value), 1_000)
     .option('--json', 'emit JSON Lines')
@@ -167,7 +233,8 @@ export function buildProgram(signal?: AbortSignal): Command {
         options: { after: number; interval: number; json?: boolean; once?: boolean },
         command: Command,
       ) => {
-        const observer = new ChatObserver(globalOptions(command).cwd);
+        const globals = globalOptions(command);
+        const observer = new ChatObserver({ cwd: globals.cwd, scope: globals.scope });
         try {
           await watchEvents(observer, {
             after: options.after,
@@ -287,6 +354,7 @@ export function buildProgram(signal?: AbortSignal): Command {
         },
         command: Command,
       ) => {
+        const assertActive = harnessBindingAssertion();
         await withLineAsync(command, async (line) => {
           const input = options.ackStdin
             ? createInterface({ input: process.stdin, terminal: false })[Symbol.asyncIterator]()
@@ -297,6 +365,7 @@ export function buildProgram(signal?: AbortSignal): Command {
             ...(options.once === undefined ? {} : { once: options.once }),
             prefix: options.prefix,
             ...(signal ? { signal } : {}),
+            ...(assertActive ? { assertActive } : {}),
             ...(input
               ? {
                   confirm: async (message: Message) => {
@@ -337,11 +406,13 @@ export function buildProgram(signal?: AbortSignal): Command {
   hooks
     .command('codex', { hidden: true })
     .requiredOption('--event <name>')
-    .action(async (options: { event: string }) => {
+    .action(async (options: { event: string }, command: Command) => {
       const watchdog = setTimeout(() => process.exit(0), 4_000);
       try {
         if (!isCodexHookEvent(options.event)) return;
-        await handleCodexHook(options.event, readStdin(1_000_000));
+        await handleCodexHook(options.event, readStdin(1_000_000), {
+          scope: globalOptions(command).scope,
+        });
       } catch {
       } finally {
         clearTimeout(watchdog);

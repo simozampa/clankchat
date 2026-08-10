@@ -27,6 +27,11 @@ export function repository(prefix = 'clankerchat-test-'): TestRepository {
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
+export function directory(prefix = 'clankerchat-directory-'): TestRepository {
+  const root = mkdtempSync(path.join(tmpdir(), prefix));
+  return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
 export function linkedWorktree(root: string): string {
   const parent = path.dirname(root);
   const linked = path.join(parent, `${path.basename(root)}-linked`);

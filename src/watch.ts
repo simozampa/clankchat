@@ -156,6 +156,7 @@ export async function followMessages(
     signal?: AbortSignal;
     write?: (value: string) => void | Promise<void>;
     confirm?: (message: Message) => boolean | Promise<boolean>;
+    assertActive?: () => void;
   } = {},
 ): Promise<number> {
   const write = options.write ?? stdoutLine;
@@ -163,8 +164,10 @@ export async function followMessages(
   let reserved: Message | null = null;
   try {
     while (!options.signal?.aborted) {
+      options.assertActive?.();
       reserved = line.reserveNextDelivery();
       if (reserved) {
+        options.assertActive?.();
         if (!line.deliveryIsCurrent(reserved.id)) {
           line.releaseDelivery(reserved.id);
           reserved = null;
@@ -172,12 +175,15 @@ export async function followMessages(
         }
         const output = options.json ? jsonLine(reserved) : formatMessage(reserved);
         try {
+          options.assertActive?.();
           await write(`${terminalSafe(options.prefix ?? '')}${output}`);
+          options.assertActive?.();
         } catch (error) {
           if (brokenPipe(error)) return delivered;
           throw error;
         }
         if (options.confirm && !(await options.confirm(reserved))) return delivered;
+        options.assertActive?.();
         line.completeDelivery(reserved.id);
         delivered += 1;
         reserved = null;
